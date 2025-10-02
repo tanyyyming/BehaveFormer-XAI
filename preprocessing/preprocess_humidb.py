@@ -441,6 +441,9 @@ def main(args):
 
 
 if __name__ == "__main__":
+    # Multiprocessor set start method to 'fork' to suit the code (possibly written for Linux)
+    multiprocessing.set_start_method('fork')
+    
     # Global variable
     logger = logging.getLogger()
 
