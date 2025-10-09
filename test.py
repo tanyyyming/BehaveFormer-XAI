@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 from model.behaveformer import BehaveFormer
 from model.dataset import HUMITestDataset, FETATestDataset
 from evaluation.metrics import Metric
+from xai import Xai
 from utils.config import Config
 from utils.utils import read_pickle
 
@@ -74,6 +75,7 @@ def get_evaluate_results(feature_embeddings, num_enroll_sessions, num_verify_ses
     if dataset == 'humi':
         for i in range(feature_embeddings.shape[0]): 
             all_ver_embeddings = torch.cat([feature_embeddings[i,num_enroll_sessions:], torch.flatten(feature_embeddings[:i,num_enroll_sessions:], start_dim=0, end_dim=1), torch.flatten(feature_embeddings[i+1:,num_enroll_sessions:], start_dim=0, end_dim=1)], dim=0)
+            print(all_ver_embeddings.shape, feature_embeddings.shape)
             scores = Metric.cal_session_distance_fixed_sessions(all_ver_embeddings, feature_embeddings[i,:num_enroll_sessions])
             periods = get_periods(i, num_enroll_sessions, num_verify_sessions)   #### use num_verify_sessions for period & also skip num_enroll_sessions
             labels = torch.tensor([1] * num_verify_sessions + [0] * (feature_embeddings.shape[0] - 1) * num_verify_sessions)
@@ -194,6 +196,7 @@ def get_args():
     parser.add_argument('--trained_weights_pt', help="Trained weights in .pt file use for testing")
     parser.add_argument('--test_pickle', help="Test processed data. If not passed, use file in the config", default='')
     parser.add_argument('--work_dirs_subfolder', help="Subfolder in work_dirs, used for ablation study to not clutter main results folder", default='')
+    parser.add_argument('--xai', help="XAI method, options: ig", nargs='+', default='')
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -203,6 +206,7 @@ if __name__ == "__main__":
     print(f"INFO: Input argument: {str(args)}")
     dataname = args.dataname
     metric_list = args.metric
+    xai_list = args.xai if hasattr(args, 'xai') else []
     print(metric_list)
 
     # Get output folder from config filename
@@ -304,6 +308,10 @@ if __name__ == "__main__":
             perplexity = 10
             logger.info(f"tSNE perplexity {perplexity}")
             Metric.save_PCA_curve_fixed_sessions(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, target_len), number_of_enrollment_sessions + num_verify_sessions, 10, results_path, perplexity=perplexity)
+        if "ig" in xai_list:
+            # Integrated Gradients with userid == 0 hardcoded for demo purpose
+            Xai.use_integrated_gradients(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, target_len), test_dataset, model, number_of_enrollment_sessions, user_id=0)
+
 
     elif dataname == 'feta':
         num_users = len(test_dataset.user_list)

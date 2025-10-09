@@ -11,6 +11,7 @@ import pickle
 import numpy as np
 from torch.utils.data import Dataset
 import torch
+from typing import Optional
 
 class BaseTrainDataset(Dataset):
     """Train dataset that loads data during training"""
@@ -331,6 +332,18 @@ class HUMITestDataset(BaseTestDataset):
             self.data[user_idx] = [user[i] for i in action_session]
             for idx, session in enumerate(self.data[user_idx]):
                 self.data[user_idx][idx] = session[:1]
+
+    def get_sample_from_user(self, user_idx, sess_idx=0, seq_idx=0) -> list[np.array, Optional[np.array]]:
+        """
+        Returns (scroll_tensor, imu_tensor_or_None) with batch dim added.
+        Shapes match the model inputs:
+            scroll: (1, 50, 8)
+            imu   : (1, 100, 36) or None if imu_type == 'none'
+        """
+        scroll_np, imu_np = self.data[user_idx][sess_idx][seq_idx]
+        scroll_t = torch.from_numpy(scroll_np[:, 1:-1]).unsqueeze(0)  # add batch dim
+        imu_t = None if self.imu_type == 'none' else torch.from_numpy(imu_np[:, self.imu_cols]).unsqueeze(0)
+        return scroll_t, imu_t
 
 class FETATrainDataset(BaseTrainDataset):
     DATASET_NAME = 'FETA'
