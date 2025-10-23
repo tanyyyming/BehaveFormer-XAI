@@ -93,7 +93,7 @@ def scroll_feature_extract(scroll_type_data, scroll=None):
 
     scroll_type_data["event_time"] = scroll_type_data["event_time"].astype(int)
     if (scroll_type_data.isnull().values.any()):
-        logger.info("WARNING: IMU datframe contains NaN")
+        logger.info("WARNING: Scroll dataframe contains NaN")
     
     scroll_type_data["x"] = scroll_type_data["x"].astype(float)
     scroll_type_data["y"] = scroll_type_data["y"].astype(float)

@@ -88,3 +88,73 @@ def plot_feature_profile(attr: torch.Tensor, title: str, out_path: str = None, f
         plt.close()
     else:
         plt.show()
+
+def plot_square_heatmap(
+    mat: torch.Tensor,
+    title: str,
+    x_label: str,
+    y_label: str,
+    out_path: str | None = None,
+    cmap: str = "viridis",
+    vmax_percentile: float = 99.0,
+):
+    """
+    mat: (N, N) rollout matrix (non-negative)
+      - columns = source tokens (what influences)
+      - rows    = target tokens (what gets influenced)
+    """
+    arr = _as_numpy(mat)
+    vmin, vmax = 0.0, np.percentile(arr, vmax_percentile)
+    vmax = max(vmax, 1e-12)  # avoid zero-range
+    plt.figure(figsize=(4.8, 4.2))
+    plt.imshow(arr, aspect="auto", origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
+    plt.colorbar(label="rollout weight")
+    plt.xlabel(x_label)
+    plt.ylabel(y_label)
+    plt.title(title)
+    plt.tight_layout()
+    if out_path:
+        plt.savefig(out_path, dpi=180)
+        plt.close()
+    else:
+        plt.show()
+
+
+def plot_token_importance(
+    mat: torch.Tensor,
+    reduce: str,
+    title: str,
+    x_label: str,
+    out_path: str | None = None,
+    xticklabels: list[str] | None = None,
+):
+    """
+    Build a 1-D importance vector from a rollout matrix (N, N).
+    Common choices:
+      - reduce='col'  -> importance of each SOURCE token = mean over target rows
+      - reduce='row'  -> importance of each TARGET token = mean over source cols
+    """
+    arr = _as_numpy(mat)
+    if reduce == "col":
+        vec = arr.mean(axis=0)  # influence of each source token overall
+    elif reduce == "row":
+        vec = arr.mean(axis=1)  # susceptibility of each target token overall
+    else:
+        raise ValueError("reduce must be 'col' or 'row'")
+
+    plt.figure(figsize=(6.4, 2.4))
+    xs = np.arange(len(vec))
+    plt.bar(xs, vec)
+    if xticklabels is not None and len(xticklabels) == len(vec):
+        plt.xticks(xs, xticklabels, rotation=45, ha="right")
+    else:
+        plt.xticks(xs)
+    plt.xlabel(x_label)
+    plt.ylabel("rollout importance")
+    plt.title(title)
+    plt.tight_layout()
+    if out_path:
+        plt.savefig(out_path, dpi=180)
+        plt.close()
+    else:
+        plt.show()

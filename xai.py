@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from model.dataset import HUMITestDataset
 from model.behaveformer import BehaveFormer
-from utils.plot import plot_attr_heatmap, plot_time_profile, plot_feature_profile
+from utils.plot import *
 
 class Xai:
     @staticmethod
@@ -85,7 +85,7 @@ class Xai:
         num_users, num_sessions, num_seqs, _ = feature_embeddings.size()
 
         enroll_vectors = feature_embeddings[user_id, :num_enroll_sessions] # (num_enroll_sessions, num_seqs, feature_dim)
-        genuine_scroll, genuine_imu = test_dataset.get_sample_from_user(user_id, 1, 0)
+        genuine_scroll, genuine_imu = test_dataset.get_sample_from_user(user_id, 3, 0)
         imposter_scroll, imposter_imu = test_dataset.get_sample_from_user((user_id + 1) % num_users, 1, 0)
 
         genuine_scroll_attr, genuine_imu_attr = Xai.compute_integrated_gradients_negmean(
@@ -170,3 +170,127 @@ class Xai:
                                 feature_names=imu_feature_names,
                                 signed=False)
 
+    @staticmethod
+    def compute_attention_rollout(attn_maps: list[torch.Tensor], residual_beta=0.2):
+        # attn_maps: list of attention map of the form (B, H, L, L)
+        B, _, L, _ = attn_maps[0].shape
+        eye = torch.eye(L, device=attn_maps[0].device).unsqueeze(0).expand(B, L, L) # (B, L, L)
+        R = eye.clone()
+        for a in attn_maps:
+            A = a.mean(dim=1)                  # avg heads -> (B, L, L)
+            # Add residual and (re)normalize per paper: A' = (1-β)A + βI
+            A = (1.0 - residual_beta) * A + residual_beta * eye
+            A = A / (A.sum(dim=-1, keepdim=True) + 1e-8)  # row norm
+            R = A @ R
+        
+        # try only return the averaged attention map of the last layer
+        # return attn_maps[-1].mean(dim=1) / attn_maps[-1].mean(dim=1).sum(dim=-1, keepdim=True)  # (B, L, L)
+        return R  # (B, L, L)
+
+    @staticmethod
+    def compute_attention_flow(attn_maps: list[torch.Tensor]):
+        """
+        Implements 'Attention Flow' per Abnar & Zuidema (2020)
+        attn_maps: list of attention weights (B, H, N, N) or (B, N, N)
+        returns: (B, N, N) flow matrix
+        """
+        # Average over heads
+        A_list = [a.mean(dim=1) if a.dim() == 4 else a for a in attn_maps]
+
+        # Add small epsilon to avoid log(0)
+        eps = 1e-8
+        logA = [torch.log(a + eps) for a in A_list]
+
+        # Sum log-attention across layers (i.e. product of attention matrices)
+        log_sum = torch.stack(logA, dim=0).sum(dim=0)  # (B, N, N)
+
+        # Apply softmax row-wise to normalize
+        flow = torch.softmax(log_sum, dim=-1)
+        return flow
+
+    @staticmethod
+    def use_attention_rollout(test_dataset: HUMITestDataset, model: BehaveFormer, user_id=0):
+        """
+        Use attention rollout to get attention maps for scroll and imu.
+        """
+        # get example sample
+        scroll, imu = test_dataset.get_sample_from_user(user_id, 3, 0)
+
+        with torch.no_grad():
+            _, scroll_t_attn_maps, scroll_c_attn_maps = model.behave_transformer(scroll.float(), return_attn_weights=True)
+            if imu is not None:
+                _, imu_t_attn_maps, imu_c_attn_maps = model.imu_transformer(imu.float(), return_attn_weights=True)
+        
+        scroll_t_rollout = Xai.compute_attention_rollout(scroll_t_attn_maps).squeeze(0) # (L, L)
+        scroll_c_rollout = Xai.compute_attention_rollout(scroll_c_attn_maps).squeeze(0) # (F, F)
+        imu_t_rollout, imu_c_rollout = None, None
+        if imu is not None:
+            imu_t_rollout = Xai.compute_attention_rollout(imu_t_attn_maps).squeeze(0) # (L, L)
+            imu_c_rollout = Xai.compute_attention_rollout(imu_c_attn_maps).squeeze(0) # (F, F)
+
+        # 2) (optional) feature names for nicer x-axis on channel plots
+        scroll_feature_names = ["x","y","fft_x","fft_y","fd_x","fd_y","sd_x","sd_y"] if scroll_c_rollout.shape[0] == 8 else None
+        imu_feature_names = None
+        if imu_c_rollout is not None and imu_c_rollout.shape[0] == 36:
+            imu_feature_names = [
+                # accel 12
+                "a_x","a_y","a_z","a_fft_x","a_fft_y","a_fft_z","a_fd_x","a_fd_y","a_fd_z","a_sd_x","a_sd_y","a_sd_z",
+                # gyro 12
+                "g_x","g_y","g_z","g_fft_x","g_fft_y","g_fft_z","g_fd_x","g_fd_y","g_fd_z","g_sd_x","g_sd_y","g_sd_z",
+                # mag 12
+                "m_x","m_y","m_z","m_fft_x","m_fft_y","m_fft_z","m_fd_x","m_fd_y","m_fd_z","m_sd_x","m_sd_y","m_sd_z",
+            ]
+
+        # 3) Visualize SCROLL (temporal + channel)
+        plot_square_heatmap(
+            scroll_t_rollout,
+            title=f"Scroll temporal rollout (user {user_id})",
+            x_label="source time",
+            y_label="target time",
+        )
+        plot_token_importance(
+            scroll_t_rollout, reduce="col",
+            title=f"Scroll temporal importance (source→all)",
+            x_label="time index",
+        )
+
+        plot_square_heatmap(
+            scroll_c_rollout,
+            title=f"Scroll channel rollout (user {user_id})",
+            x_label="source channel",
+            y_label="target channel",
+        )
+        plot_token_importance(
+            scroll_c_rollout, reduce="col",
+            title=f"Scroll channel importance (source→all)",
+            x_label="channel",
+            xticklabels=scroll_feature_names,
+        )
+
+        # 4) Visualize IMU (if present)
+        if imu_t_rollout is not None:
+            plot_square_heatmap(
+                imu_t_rollout,
+                title=f"IMU temporal rollout (user {user_id})",
+                x_label="source time",
+                y_label="target time",
+            )
+            plot_token_importance(
+                imu_t_rollout, reduce="col",
+                title=f"IMU temporal importance (source→all)",
+                x_label="time index",
+            )
+
+        if imu_c_rollout is not None:
+            plot_square_heatmap(
+                imu_c_rollout,
+                title=f"IMU channel rollout (user {user_id})",
+                x_label="source channel",
+                y_label="target channel",
+            )
+            plot_token_importance(
+                imu_c_rollout, reduce="col",
+                title=f"IMU channel importance (source→all)",
+                x_label="channel",
+                xticklabels=imu_feature_names,
+            )

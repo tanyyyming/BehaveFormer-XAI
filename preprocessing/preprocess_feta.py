@@ -113,7 +113,7 @@ def imu_feature_extract(imu_type_data):
 def scroll_feature_extract(scroll_type_data):
     """Extracting scroll/swipe features, applicable for both scroll up and scroll down actions.
     Use same features as IMU. References: ...
-
+ 
     Args:
         scroll_type_data (DataFrame): Input scroll data of 1 session, shape (N, 3)
             N: number of timepoints
@@ -124,8 +124,8 @@ def scroll_feature_extract(scroll_type_data):
         DataFrame: _description_
     """
     scroll_type_data["event_time"] = scroll_type_data["event_time"].astype(int)
-    if (scroll_type_data.isnull().values.any()):
-        logger.info("WARNING: IMU datframe contains NaN")
+    if (scroll_type_data.isnull().values.any()): # The code is not dealing with the missing value if there is any
+        logger.info("WARNING: Scroll dataframe contains NaN")
     
     scroll_type_data["x"] = scroll_type_data["x"].astype(float)
     scroll_type_data["y"] = scroll_type_data["y"].astype(float)

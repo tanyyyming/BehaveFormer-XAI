@@ -61,9 +61,15 @@ class TransformerEncoderLayer(nn.Module):
         
         self.final_norm = nn.LayerNorm(feature_dim)
 
-    def forward(self, src, src_mask=None):
-        src = self.attn_norm(src + self.temporal_attention(src, src, src)[0] + self.channel_attention(src.transpose(-1, -2), src.transpose(-1, -2), src.transpose(-1, -2))[0].transpose(-1, -2))
+    def forward(self, src, src_mask=None, return_attn_weights=False):
+        temporal_attn_output, temporal_attn_weights = self.temporal_attention(src, src, src, average_attn_weights=False)
+        channel_attn_output, channel_attn_weights = self.channel_attention(src.transpose(-1, -2), src.transpose(-1, -2), src.transpose(-1, -2), average_attn_weights=False)
+
+        src = self.attn_norm(src + temporal_attn_output + channel_attn_output.transpose(-1, -2))
         src = self.final_norm(src + self.cnn(src.unsqueeze(dim=1)).squeeze(dim=1))
+
+        if return_attn_weights:
+            return src, temporal_attn_weights, channel_attn_weights
             
         return src
 
@@ -75,11 +81,19 @@ class TransformerEncoder(nn.Module):
         for _ in range(num_layer):
             self.layers.append(TransformerEncoderLayer(feature_dim, temporal_heads, channel_heads, dropout, seq_len))
 
-    def forward(self, src):
+    def forward(self, src, return_attn_weights=False):
+        temp_attns, chan_attns = [], []
         for layer in self.layers:
-            src = layer(src)
-
-        return src
+            if return_attn_weights:
+                src, temp_attn, chan_attn = layer(src, return_attn_weights=True)
+                temp_attns.append(temp_attn) # (B, H_t, T, T), T = 50 for scroll, 100 for imu
+                chan_attns.append(chan_attn) # (B, H_c, F, F), F = 8 for scroll, 36 for imu
+            else:
+                src = layer(src)
+        if return_attn_weights:
+            return src, temp_attns, chan_attns
+        else:
+            return src
 
 class Transformer(nn.Module):
     def __init__(self, num_layer, feature_dim, gre_k, temporal_heads, channel_heads, seq_len, dropout, imu_type):
@@ -89,10 +103,10 @@ class Transformer(nn.Module):
 
         self.encoder = TransformerEncoder(feature_dim, temporal_heads, channel_heads, seq_len, num_layer, dropout)
 
-    def forward(self, inputs):
+    def forward(self, inputs, return_attn_weights=False):
         encoded_inputs = self.pos_encoding(inputs)
 
-        return self.encoder(encoded_inputs)
+        return self.encoder(encoded_inputs, return_attn_weights=return_attn_weights)
 
 class BehaveFormer(nn.Module):
     def __init__(self, 

@@ -310,8 +310,10 @@ if __name__ == "__main__":
             Metric.save_PCA_curve_fixed_sessions(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, target_len), number_of_enrollment_sessions + num_verify_sessions, 10, results_path, perplexity=perplexity)
         if "ig" in xai_list:
             # Integrated Gradients with userid == 0 hardcoded for demo purpose
-            Xai.use_integrated_gradients(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, target_len), test_dataset, model, number_of_enrollment_sessions, user_id=0)
-
+            Xai.use_integrated_gradients(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, target_len), test_dataset, model, number_of_enrollment_sessions, user_id=8)
+        if "attn" in xai_list:
+            # Attention Rollout with userid == 0 hardcoded for demo purpose
+            Xai.use_attention_rollout(test_dataset, model, user_id=0)
 
     elif dataname == 'feta':
         num_users = len(test_dataset.user_list)
