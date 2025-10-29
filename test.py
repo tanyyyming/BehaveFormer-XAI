@@ -18,6 +18,15 @@ from xai import Xai
 from utils.config import Config
 from utils.utils import read_pickle
 
+SCROLL_FEATURE_NAMES = ["x","y","fft_x","fft_y","fd_x","fd_y","sd_x","sd_y"]
+IMU_FEATURE_NAMES = [
+    # accel (a_)
+    "a_x","a_y","a_z","a_fft_x","a_fft_y","a_fft_z","a_fd_x","a_fd_y","a_fd_z","a_sd_x","a_sd_y","a_sd_z",
+    # gyro (g_)
+    "g_x","g_y","g_z","g_fft_x","g_fft_y","g_fft_z","g_fd_x","g_fd_y","g_fd_z","g_sd_x","g_sd_y","g_sd_z",
+    # mag (m_)
+    "m_x","m_y","m_z","m_fft_x","m_fft_y","m_fft_z","m_fd_x","m_fd_y","m_fd_z","m_sd_x","m_sd_y","m_sd_z",
+]
 
 def set_random_seeds(seed: int):
     """
@@ -314,6 +323,15 @@ if __name__ == "__main__":
         if "attn" in xai_list:
             # Attention Rollout with userid == 0 hardcoded for demo purpose
             Xai.use_attention_rollout(test_dataset, model, user_id=0)
+        if "occlusion" in xai_list:
+            # Occlusion with userid == 0 hardcoded for demo purpose
+            which = "scroll"
+            feat_dict = {name: [idx] for idx, name in enumerate(SCROLL_FEATURE_NAMES)} if which == "scroll" else {name: idx for idx, name in enumerate(IMU_FEATURE_NAMES)}
+            baseline = torch.tensor([0.5] * 2 + [0.0] * 6) if which == "scroll" else torch.tensor([0.0] * 36)
+            for user_id in range(10,30):
+                Xai.use_occlusion_sensitivity(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, target_len), 
+                                          test_dataset, model, number_of_enrollment_sessions, 
+                                          which=which, feat_dict=feat_dict, user_id=user_id, baseline=baseline)
 
     elif dataname == 'feta':
         num_users = len(test_dataset.user_list)

@@ -44,19 +44,7 @@ class Xai:
                 interp_imu = None
                 z = model(interp_scroll.float())                # (1, D)
 
-            # Compute distance to each enrolment embedding
-            if distance_type == "euclidean":
-                # (E,) distances
-                dist = torch.norm(z - enroll_vectors, p=2, dim=1)  # broadcasting z to (E, D)
-                score = -(dist.mean())                             # scalar
-            elif distance_type == "cosine":
-                z_norm = torch.nn.functional.normalize(z, dim=1)      # (1, D)
-                E_norm = torch.nn.functional.normalize(enroll_vectors, dim=1)  # (E, D)
-                # Cosine distance = 1 - cos
-                cos_sim = torch.matmul(E_norm, z_norm.t()).squeeze()   # (E,)
-                score = cos_sim.mean()                                # negative cosine distance is just cos similarity
-            else:
-                raise ValueError("distance_type must be 'euclidean' or 'cosine'")
+            score = Xai.compute_similarity_score(z, enroll_vectors, distance_type=distance_type)
 
             score.backward()
             accum_grad_scroll += interp_scroll.grad.detach()
@@ -74,9 +62,9 @@ class Xai:
             attr_imu = None
 
         return attr_scroll, attr_imu
-    
+
     @staticmethod
-    def use_integrated_gradients(feature_embeddings, test_dataset: HUMITestDataset, 
+    def use_integrated_gradients(feature_embeddings, test_dataset: HUMITestDataset,
                                  model: BehaveFormer, num_enroll_sessions, user_id=0):
         """
         feature_embeddings: (num_users, num_sessions, num_seqs, feature_dim)
@@ -85,7 +73,7 @@ class Xai:
         num_users, num_sessions, num_seqs, _ = feature_embeddings.size()
 
         enroll_vectors = feature_embeddings[user_id, :num_enroll_sessions] # (num_enroll_sessions, num_seqs, feature_dim)
-        genuine_scroll, genuine_imu = test_dataset.get_sample_from_user(user_id, 3, 0)
+        genuine_scroll, genuine_imu = test_dataset.get_sample_from_user(user_id, 1, 0)
         imposter_scroll, imposter_imu = test_dataset.get_sample_from_user((user_id + 1) % num_users, 1, 0)
 
         genuine_scroll_attr, genuine_imu_attr = Xai.compute_integrated_gradients_negmean(
@@ -294,3 +282,110 @@ class Xai:
                 x_label="channel",
                 xticklabels=imu_feature_names,
             )
+
+    @staticmethod
+    def mask_channels(x: torch.Tensor, feat_idx, baseline):
+        """
+        Replace the selected features feat_idx with baseline.
+        x: (1, T, F)
+        baseline: scalar, (F,), or (1,1,F)
+        """
+        x = x.clone()
+        if isinstance(baseline, torch.Tensor):
+            if baseline.dim() == 1:
+                baseline = baseline.view(1, 1, -1)
+            baseline = baseline.to(x.device).to(x.dtype)
+            x[:, :, feat_idx] = baseline[:, :, feat_idx]
+        else:
+            x[:, :, feat_idx] = baseline
+        return x
+
+    @staticmethod
+    def mask_time_range(x: torch.Tensor, t0, t1, baseline):
+        """
+        Zero/baseline a time slice [t0, t1) along the time dimension.
+        x: (1, T, F)
+        baseline: scalar, (F,), or (1,1,F)
+        """
+        x = x.clone()
+        if isinstance(baseline, torch.Tensor):
+            if baseline.dim() == 1:
+                baseline = baseline.view(1, 1, -1)
+            baseline = baseline.to(x.device).to(x.dtype)
+            x[:, t0:t1, :] = baseline
+        else:
+            x[:, t0:t1, :] = baseline
+        return x
+    
+    @staticmethod
+    @torch.no_grad()
+    def use_occlusion_sensitivity(
+        feature_embeddings, test_dataset: HUMITestDataset, 
+        model: BehaveFormer, num_enroll_sessions,
+        which: str,
+        feat_dict: dict[str, list[int]],
+        user_id=0,
+        baseline: float | torch.Tensor = 0.0
+    ):
+        # For humidb, num_seqs = 1
+        # num_users, num_sessions, num_seqs, _ = feature_embeddings.size()
+
+        enroll_vectors = feature_embeddings[user_id, :num_enroll_sessions] # (num_enroll_sessions, num_seqs, feature_dim)
+        genuine_scroll, genuine_imu = test_dataset.get_sample_from_user(user_id, 1, 0)
+        # imposter_scroll, imposter_imu = test_dataset.get_sample_from_user((user_id + 1) % num_users, 1, 0)
+        
+        model.eval()
+        if genuine_imu is not None:
+            test_vector = model([genuine_scroll.float(), genuine_imu.float()])
+        else:
+            test_vector = model(genuine_scroll.float())
+
+        s0 = Xai.compute_similarity_score(
+            test_vector, enroll_vectors, distance_type="euclidean"
+        )
+        out = {}
+        for name, idxs in feat_dict.items():
+            if which == "imu" and genuine_imu is not None:
+                masked_input = [genuine_scroll.float(), Xai.mask_channels(genuine_imu, idxs, baseline=baseline).float()]
+            elif which == "scroll":
+                masked_scroll = Xai.mask_channels(genuine_scroll, idxs, baseline=baseline).float()
+                masked_input = [masked_scroll, genuine_imu.float()] if genuine_imu is not None else masked_scroll
+            else:
+                continue
+            
+            model_output = model(masked_input)
+            s_mask = Xai.compute_similarity_score(
+                model_output, enroll_vectors, distance_type="euclidean"
+            ).item()
+            out[name] = s0 - s_mask
+
+        plt.figure(figsize=(8, 2.2))
+        plt.plot(list(out.values()))
+        plt.xlabel("feature")
+        plt.xticks(np.arange(len(out)), list(out.keys()))
+        plt.ylabel("similarity drop")
+        plt.tight_layout()
+        plt.show()
+        return out
+        
+    @staticmethod
+    def compute_similarity_score(test_vector, enroll_vectors, distance_type="euclidean"):
+        """
+        Compute similarity score between test_vector and enroll_vectors. 
+        The score is such that the higher the score, the more similar.
+
+        test_vector: (1, F)
+        enroll_vectors: (E, F)
+        """
+        # Compute distance to each enrolment embedding
+        if distance_type == "euclidean":
+            # (E,) distances
+            dist = torch.linalg.norm(test_vector - enroll_vectors, dim=-1)  # broadcasting to (E, F)
+            score = -(dist.mean())                             # scalar
+        elif distance_type == "cosine":
+            t_norm = torch.nn.functional.normalize(test_vector, dim=1)      # (1, F)
+            E_norm = torch.nn.functional.normalize(enroll_vectors, dim=1)  # (E, F)
+            # Cosine distance = 1 - cos
+            cos_sim = torch.matmul(E_norm, t_norm.t()).squeeze()   # (E,)
+            score = cos_sim.mean()                                # negative cosine distance is just cos similarity
+        return score
