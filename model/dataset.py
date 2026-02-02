@@ -199,6 +199,27 @@ class HUMITrainDataset(BaseTrainDataset):
             ret_imu = self.data[user_idx][_sess_idx][seq_idx][1][:, self.imu_cols]
             return [ret_scroll, ret_imu]
 
+    def calculate_data_mean(self):
+        all_scroll_features = []
+        all_imu_features = []
+        # Calculate the mean of the dataset for every feature
+        for user_data in self.data:
+            for sess_data in user_data:
+                for seq_data in sess_data: 
+                    # seq_data is [scaled_scroll_array, scaled_imu_array]
+                    
+                    # Slicing from load_data
+                    scroll_feats = seq_data[0][:, 1:-1] 
+                    all_scroll_features.append(torch.from_numpy(scroll_feats))
+
+                    imu_feats = seq_data[1][:, self.imu_cols]
+                    all_imu_features.append(torch.from_numpy(imu_feats))
+        
+        scroll_mean = torch.cat(all_scroll_features, dim=0).mean(dim=0)
+        imu_mean = torch.cat(all_imu_features, dim=0).mean(dim=0)
+
+        return scroll_mean, imu_mean
+
     def load_data_all(self):
         # For HuMIdb: Load all data in
         with open(self.training_file, 'rb') as f:

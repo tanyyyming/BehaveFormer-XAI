@@ -5,6 +5,195 @@ from model.behaveformer import BehaveFormer
 from utils.plot import *
 
 class Xai:
+    # --- Constants ---
+    SCROLL_FEATURE_NAMES = ["x","y","fft_x","fft_y","fd_x","fd_y","sd_x","sd_y"]
+    IMU_FEATURE_NAMES = [
+        # accel (a_)
+        "a_x","a_y","a_z","a_fft_x","a_fft_y","a_fft_z","a_fd_x","a_fd_y","a_fd_z","a_sd_x","a_sd_y","a_sd_z",
+        # gyro (g_)
+        "g_x","g_y","g_z","g_fft_x","g_fft_y","g_fft_z","g_fd_x","g_fd_y","g_fd_z","g_sd_x","g_sd_y","g_sd_z",
+        # mag (m_)
+        "m_x","m_y","m_z","m_fft_x","m_fft_y","m_fft_z","m_fd_x","m_fd_y","m_fd_z","m_sd_x","m_sd_y","m_sd_z",
+    ]
+    BASELINE_SCROLL = torch.tensor([0.5] * 2 + [0.0] * 6)  # for scroll features
+    BASELINE_IMU = torch.tensor([0.0] * 36)                # for imu features
+
+    # --- Private Plotting Helpers ---
+    @staticmethod
+    def _plot_attribution_analysis(
+        attr_tensor: Optional[torch.Tensor],
+        title_prefix: str,
+        feature_names: list[str],
+        scroll: Optional[torch.Tensor] = None,
+        signed: bool = True,
+        out_dir: Optional[str] = None
+    ):
+        """
+        Helper to bundle the 3 standard attribution plots:
+        1. plot_attr_heatmap
+        2. plot_time_profile
+        3. plot_feature_profile
+        """
+        if attr_tensor is None:
+            return
+
+        # Create save paths if out_dir is provided
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+            heatmap_path = os.path.join(out_dir, "heatmap.png")
+            time_path = os.path.join(out_dir, "time_profile.png")
+            feat_path = os.path.join(out_dir, "feature_profile.png")
+        else:
+            heatmap_path, time_path, feat_path = None, None, None
+
+        plot_attr_heatmap(
+            attr_tensor,
+            title=f"{title_prefix} IG",
+            signed=signed,
+            feature_names=feature_names,
+            out_path=heatmap_path
+        )
+        
+        scroll_xy_data = None
+        if scroll is not None:
+            scroll_xy_data = (scroll[:, 0], scroll[:, 1])
+        plot_time_profile(
+            attr_tensor,
+            title=f"{title_prefix} time profile",
+            signed=False,
+            out_path=time_path,
+            scroll_xy=scroll_xy_data
+        )
+
+        plot_feature_profile(
+            attr_tensor,
+            title=f"{title_prefix} feature profile",
+            feature_names=feature_names,
+            signed=False,
+            out_path=feat_path
+        )
+    
+    @staticmethod
+    def _plot_aggregated_attribution_analysis(
+        mean_scroll_feat_importance: torch.Tensor,
+        mean_scroll_time_importance: torch.Tensor,
+        scroll_features: list[str],
+        mean_imu_feat_importance: Optional[torch.Tensor],
+        mean_imu_time_importance: Optional[torch.Tensor],
+        imu_features: Optional[list[str]],
+        out_dir: Optional[str]
+    ):
+        """
+        Plots the aggregated feature and time profiles from the
+        results of aggregate_integrated_gradients.
+        """
+        # --- Define base output path ---
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+
+        # --- SCROLL ---
+        # -- Plot Ranked Feature Profile --
+        sorted_indices_scroll = mean_scroll_feat_importance.argsort(descending=True)
+        sorted_scroll_features = [scroll_features[idx] for idx in sorted_indices_scroll]
+        sorted_scroll_importance = mean_scroll_feat_importance[sorted_indices_scroll]
+        
+        plot_feature_profile(
+            sorted_scroll_importance.unsqueeze(0),
+            title="Global Scroll Feature Importance (Ranked)",
+            feature_names=sorted_scroll_features, # Use sorted labels
+            signed=False,
+            out_path=os.path.join(out_dir, "genuine_scroll_ranked_features.png") if out_dir else None
+        )
+
+        # -- Plot Time Profile --
+        plot_time_profile(
+            mean_scroll_time_importance.unsqueeze(1),
+            title="Global Scroll Time Importance",
+            signed=False,
+            out_path=os.path.join(out_dir, "genuine_scroll_time_profile.png") if out_dir else None
+        )
+
+        # --- IMU ---
+        if mean_imu_feat_importance is not None and mean_imu_time_importance is not None:
+            # -- Plot Ranked Feature Profile --
+            sorted_indices_imu = mean_imu_feat_importance.argsort(descending=True)
+            sorted_imu_features = [imu_features[idx] for idx in sorted_indices_imu]
+            sorted_imu_importance = mean_imu_feat_importance[sorted_indices_imu]
+
+            plot_feature_profile(
+                sorted_imu_importance.unsqueeze(0),
+                title="Global IMU Feature Importance (Ranked)",
+                feature_names=sorted_imu_features,
+                signed=False,
+                out_path=os.path.join(out_dir, "genuine_imu_ranked_features.png") if out_dir else None
+            )
+
+            # -- Plot Time Profile --
+            plot_time_profile(
+                mean_imu_time_importance.unsqueeze(1),
+                title="Global IMU Time Importance",
+                signed=False,
+                out_path=os.path.join(out_dir, "genuine_imu_time_profile.png") if out_dir else None
+            )
+
+    @staticmethod
+    def _plot_attention_analysis(
+        attn_t: Optional[torch.Tensor],
+        attn_c: Optional[torch.Tensor],
+        title_prefix: str,
+        channel_feature_names: Optional[list[str]],
+        out_dir: Optional[str] = None
+    ):
+        """
+        Helper to bundle the 2 standard attention rollout/flow plots for both
+        temporal (T) and channel (C) attention.
+        1. plot_square_heatmap
+        2. plot_token_importance
+        """
+        # Create save paths if out_dir is provided
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+            t_heatmap_path = os.path.join(out_dir, "temporal_heatmap.png")
+            t_importance_path = os.path.join(out_dir, "temporal_importance.png")
+            c_heatmap_path = os.path.join(out_dir, "channel_heatmap.png")
+            c_importance_path = os.path.join(out_dir, "channel_importance.png")
+        else:
+            t_heatmap_path, t_importance_path = None, None
+            c_heatmap_path, c_importance_path = None, None
+
+        # --- Temporal Plots ---
+        if attn_t is not None:
+            plot_square_heatmap(
+                attn_t,
+                title=f"{title_prefix} - temporal",
+                x_label="source time",
+                y_label="target time",
+                out_path=t_heatmap_path
+            )
+            plot_token_importance(
+                attn_t, reduce="col",
+                title=f"{title_prefix} temporal importance (source→all)",
+                x_label="time index",
+                out_path=t_importance_path
+            )
+        
+        # --- Channel Plots ---
+        if attn_c is not None:
+            plot_square_heatmap(
+                attn_c,
+                title=f"{title_prefix} - channel",
+                x_label="source channel",
+                y_label="target channel",
+                out_path=c_heatmap_path
+            )
+            plot_token_importance(
+                attn_c, reduce="col",
+                title=f"{title_prefix} channel importance (source→all)",
+                x_label="channel",
+                xticklabels=channel_feature_names,
+                out_path=c_importance_path
+            )
+
     @staticmethod
     def compute_integrated_gradients_negmean(
         model,
@@ -24,9 +213,9 @@ class Xai:
         model.eval()
 
         if baseline_scroll is None:
-            baseline_scroll = torch.zeros_like(scroll)
+            baseline_scroll = Xai.BASELINE_SCROLL
         if imu is not None and baseline_imu is None:
-            baseline_imu = torch.zeros_like(imu)
+            baseline_imu = Xai.BASELINE_IMU
         # move enrolment vectors to device and add batch dim for broadcasting
         enroll_vectors = enroll_vectors.to(scroll.device)  # shape (E, D)
 
@@ -62,101 +251,6 @@ class Xai:
             attr_imu = None
 
         return attr_scroll, attr_imu
-
-    @staticmethod
-    def use_integrated_gradients(feature_embeddings, test_dataset: HUMITestDataset,
-                                 model: BehaveFormer, num_enroll_sessions, user_id=0):
-        """
-        feature_embeddings: (num_users, num_sessions, num_seqs, feature_dim)
-        """
-        # For humidb, num_seqs = 1
-        num_users, num_sessions, num_seqs, _ = feature_embeddings.size()
-
-        enroll_vectors = feature_embeddings[user_id, :num_enroll_sessions] # (num_enroll_sessions, num_seqs, feature_dim)
-        genuine_scroll, genuine_imu = test_dataset.get_sample_from_user(user_id, 1, 0)
-        imposter_scroll, imposter_imu = test_dataset.get_sample_from_user((user_id + 1) % num_users, 1, 0)
-
-        genuine_scroll_attr, genuine_imu_attr = Xai.compute_integrated_gradients_negmean(
-            model,
-            scroll=genuine_scroll,
-            imu=genuine_imu,
-            enroll_vectors=enroll_vectors,
-        )
-
-        imposter_scroll_attr, imposter_imu_attr = Xai.compute_integrated_gradients_negmean(
-            model,
-            scroll=imposter_scroll,
-            imu=imposter_imu,
-            enroll_vectors=enroll_vectors,
-        )
-
-        # Optional: feature labels (adjust if yours differ)
-        scroll_feature_names = ["x","y","fft_x","fft_y","fd_x","fd_y","sd_x","sd_y"]  # if F_s==8
-        # For IMU, example layout (36 features): 3 sensors × 12 features each
-        imu_feature_names = [
-            # accel (a_)
-            "a_x","a_y","a_z","a_fft_x","a_fft_y","a_fft_z","a_fd_x","a_fd_y","a_fd_z","a_sd_x","a_sd_y","a_sd_z",
-            # gyro (g_)
-            "g_x","g_y","g_z","g_fft_x","g_fft_y","g_fft_z","g_fd_x","g_fd_y","g_fd_z","g_sd_x","g_sd_y","g_sd_z",
-            # mag (m_)
-            "m_x","m_y","m_z","m_fft_x","m_fft_y","m_fft_z","m_fd_x","m_fd_y","m_fd_z","m_sd_x","m_sd_y","m_sd_z",
-        ] if genuine_imu_attr is not None and genuine_imu_attr.shape[1] == 36 else None
-
-        # -------- Genuine sample --------
-        plot_attr_heatmap(genuine_scroll_attr,
-                        title=f"Genuine scroll IG (user {user_id})",
-                        signed=True,
-                        feature_names=scroll_feature_names)
-
-        plot_time_profile(genuine_scroll_attr,
-                        title=f"Genuine scroll time profile (user {user_id})",
-                        signed=False)
-
-        plot_feature_profile(genuine_scroll_attr,
-                            title=f"Genuine scroll feature profile (user {user_id})",
-                            feature_names=scroll_feature_names,
-                            signed=False)
-
-        if genuine_imu_attr is not None:
-            plot_attr_heatmap(genuine_imu_attr,
-                            title=f"Genuine IMU IG (user {user_id})",
-                            signed=True,
-                            feature_names=imu_feature_names)
-            plot_time_profile(genuine_imu_attr,
-                            title=f"Genuine IMU time profile (user {user_id})",
-                            signed=False)
-            plot_feature_profile(genuine_imu_attr,
-                                title=f"Genuine IMU feature profile (user {user_id})",
-                                feature_names=imu_feature_names,
-                                signed=False)
-
-        # -------- Impostor sample --------
-        plot_attr_heatmap(imposter_scroll_attr,
-                        title=f"Impostor scroll IG (to user {user_id} template)",
-                        signed=True,
-                        feature_names=scroll_feature_names)
-
-        plot_time_profile(imposter_scroll_attr,
-                        title=f"Impostor scroll time profile (to user {user_id})",
-                        signed=False)
-
-        plot_feature_profile(imposter_scroll_attr,
-                            title=f"Impostor scroll feature profile (to user {user_id})",
-                            feature_names=scroll_feature_names,
-                            signed=False)
-
-        if imposter_imu_attr is not None:
-            plot_attr_heatmap(imposter_imu_attr,
-                            title=f"Impostor IMU IG (to user {user_id} template)",
-                            signed=True,
-                            feature_names=imu_feature_names)
-            plot_time_profile(imposter_imu_attr,
-                            title=f"Impostor IMU time profile (to user {user_id})",
-                            signed=False)
-            plot_feature_profile(imposter_imu_attr,
-                                title=f"Impostor IMU feature profile (to user {user_id})",
-                                feature_names=imu_feature_names,
-                                signed=False)
 
     @staticmethod
     def compute_attention_rollout(attn_maps: list[torch.Tensor], residual_beta=0.2):
@@ -195,93 +289,28 @@ class Xai:
         # Apply softmax row-wise to normalize
         flow = torch.softmax(log_sum, dim=-1)
         return flow
-
+    
     @staticmethod
-    def use_attention_rollout(test_dataset: HUMITestDataset, model: BehaveFormer, user_id=0):
+    def compute_similarity_score(test_vector, enroll_vectors, distance_type="euclidean"):
         """
-        Use attention rollout to get attention maps for scroll and imu.
+        Compute similarity score between test_vector and enroll_vectors. 
+        The score is such that the higher the score, the more similar.
+
+        test_vector: (1, F)
+        enroll_vectors: (E, F)
         """
-        # get example sample
-        scroll, imu = test_dataset.get_sample_from_user(user_id, 3, 0)
-
-        with torch.no_grad():
-            _, scroll_t_attn_maps, scroll_c_attn_maps = model.behave_transformer(scroll.float(), return_attn_weights=True)
-            if imu is not None:
-                _, imu_t_attn_maps, imu_c_attn_maps = model.imu_transformer(imu.float(), return_attn_weights=True)
-        
-        scroll_t_rollout = Xai.compute_attention_rollout(scroll_t_attn_maps).squeeze(0) # (L, L)
-        scroll_c_rollout = Xai.compute_attention_rollout(scroll_c_attn_maps).squeeze(0) # (F, F)
-        imu_t_rollout, imu_c_rollout = None, None
-        if imu is not None:
-            imu_t_rollout = Xai.compute_attention_rollout(imu_t_attn_maps).squeeze(0) # (L, L)
-            imu_c_rollout = Xai.compute_attention_rollout(imu_c_attn_maps).squeeze(0) # (F, F)
-
-        # 2) (optional) feature names for nicer x-axis on channel plots
-        scroll_feature_names = ["x","y","fft_x","fft_y","fd_x","fd_y","sd_x","sd_y"] if scroll_c_rollout.shape[0] == 8 else None
-        imu_feature_names = None
-        if imu_c_rollout is not None and imu_c_rollout.shape[0] == 36:
-            imu_feature_names = [
-                # accel 12
-                "a_x","a_y","a_z","a_fft_x","a_fft_y","a_fft_z","a_fd_x","a_fd_y","a_fd_z","a_sd_x","a_sd_y","a_sd_z",
-                # gyro 12
-                "g_x","g_y","g_z","g_fft_x","g_fft_y","g_fft_z","g_fd_x","g_fd_y","g_fd_z","g_sd_x","g_sd_y","g_sd_z",
-                # mag 12
-                "m_x","m_y","m_z","m_fft_x","m_fft_y","m_fft_z","m_fd_x","m_fd_y","m_fd_z","m_sd_x","m_sd_y","m_sd_z",
-            ]
-
-        # 3) Visualize SCROLL (temporal + channel)
-        plot_square_heatmap(
-            scroll_t_rollout,
-            title=f"Scroll temporal rollout (user {user_id})",
-            x_label="source time",
-            y_label="target time",
-        )
-        plot_token_importance(
-            scroll_t_rollout, reduce="col",
-            title=f"Scroll temporal importance (source→all)",
-            x_label="time index",
-        )
-
-        plot_square_heatmap(
-            scroll_c_rollout,
-            title=f"Scroll channel rollout (user {user_id})",
-            x_label="source channel",
-            y_label="target channel",
-        )
-        plot_token_importance(
-            scroll_c_rollout, reduce="col",
-            title=f"Scroll channel importance (source→all)",
-            x_label="channel",
-            xticklabels=scroll_feature_names,
-        )
-
-        # 4) Visualize IMU (if present)
-        if imu_t_rollout is not None:
-            plot_square_heatmap(
-                imu_t_rollout,
-                title=f"IMU temporal rollout (user {user_id})",
-                x_label="source time",
-                y_label="target time",
-            )
-            plot_token_importance(
-                imu_t_rollout, reduce="col",
-                title=f"IMU temporal importance (source→all)",
-                x_label="time index",
-            )
-
-        if imu_c_rollout is not None:
-            plot_square_heatmap(
-                imu_c_rollout,
-                title=f"IMU channel rollout (user {user_id})",
-                x_label="source channel",
-                y_label="target channel",
-            )
-            plot_token_importance(
-                imu_c_rollout, reduce="col",
-                title=f"IMU channel importance (source→all)",
-                x_label="channel",
-                xticklabels=imu_feature_names,
-            )
+        # Compute distance to each enrolment embedding
+        if distance_type == "euclidean":
+            # (E,) distances
+            dist = torch.linalg.norm(test_vector - enroll_vectors, dim=-1)  # broadcasting to (E, F)
+            score = -(dist.mean())                             # scalar
+        elif distance_type == "cosine":
+            t_norm = torch.nn.functional.normalize(test_vector, dim=1)      # (1, F)
+            E_norm = torch.nn.functional.normalize(enroll_vectors, dim=1)  # (E, F)
+            # Cosine distance = 1 - cos
+            cos_sim = torch.matmul(E_norm, t_norm.t()).squeeze()   # (E,)
+            score = cos_sim.mean()                                # negative cosine distance is just cos similarity
+        return score
 
     @staticmethod
     def mask_channels(x: torch.Tensor, feat_idx, baseline):
@@ -316,23 +345,267 @@ class Xai:
         else:
             x[:, t0:t1, :] = baseline
         return x
-    
-    @staticmethod
-    @torch.no_grad()
-    def use_occlusion_sensitivity(
-        feature_embeddings, test_dataset: HUMITestDataset, 
-        model: BehaveFormer, num_enroll_sessions,
-        which: str,
-        feat_dict: dict[str, list[int]],
-        user_id=0,
-        baseline: float | torch.Tensor = 0.0
-    ):
-        # For humidb, num_seqs = 1
-        # num_users, num_sessions, num_seqs, _ = feature_embeddings.size()
 
-        enroll_vectors = feature_embeddings[user_id, :num_enroll_sessions] # (num_enroll_sessions, num_seqs, feature_dim)
-        genuine_scroll, genuine_imu = test_dataset.get_sample_from_user(user_id, 1, 0)
-        # imposter_scroll, imposter_imu = test_dataset.get_sample_from_user((user_id + 1) % num_users, 1, 0)
+    @staticmethod
+    def use_integrated_gradients(
+        feature_embeddings, 
+        test_dataset: HUMITestDataset,
+        model: BehaveFormer, 
+        num_enroll_sessions, 
+        user_id=0,
+        out_dir: Optional[str] = None
+    ):
+        """
+        feature_embeddings: (num_users, num_sessions, num_seqs, feature_dim)
+        """
+        num_users, num_sessions, num_seqs, _ = feature_embeddings.size()
+
+        enroll_vectors = feature_embeddings[user_id, :num_enroll_sessions]
+        sess_idx = 0  # use first session for testing
+        genuine_scroll, genuine_imu = test_dataset.get_sample_from_user(user_id, sess_idx, 0)
+        imposter_scroll, imposter_imu = test_dataset.get_sample_from_user((user_id + 1) % num_users, sess_idx, 0)
+
+        genuine_scroll_attr, genuine_imu_attr = Xai.compute_integrated_gradients_negmean(
+            model,
+            scroll=genuine_scroll,
+            imu=genuine_imu,
+            enroll_vectors=enroll_vectors,
+        )
+
+        imposter_scroll_attr, imposter_imu_attr = Xai.compute_integrated_gradients_negmean(
+            model,
+            scroll=imposter_scroll,
+            imu=imposter_imu,
+            enroll_vectors=enroll_vectors,
+        )
+        
+        # Get feature names from constants
+        scroll_features = Xai.SCROLL_FEATURE_NAMES if genuine_scroll_attr.shape[1] == 8 else None
+        imu_features = Xai.IMU_FEATURE_NAMES if genuine_imu_attr is not None and genuine_imu_attr.shape[1] == 36 else None
+
+        # -------- Genuine sample --------
+        Xai._plot_attribution_analysis(
+            genuine_scroll_attr,
+            title_prefix=f"Genuine scroll (user {user_id})",
+            feature_names=scroll_features,
+            scroll=genuine_scroll.squeeze(0),
+            out_dir=os.path.join(out_dir, "integrated_gradients", f"user_{user_id}", "genuine_scroll") if out_dir else None
+        )
+        if genuine_imu_attr is not None:
+            Xai._plot_attribution_analysis(
+                genuine_imu_attr,
+                title_prefix=f"Genuine IMU (user {user_id})",
+                feature_names=imu_features,
+                scroll=genuine_scroll.squeeze(0).repeat_interleave(2, dim=0),
+                out_dir=os.path.join(out_dir, "integrated_gradients", f"user_{user_id}", "genuine_imu") if out_dir else None
+            )
+
+        # -------- Impostor sample --------
+        Xai._plot_attribution_analysis(
+            imposter_scroll_attr,
+            title_prefix=f"Impostor scroll (to user {user_id})",
+            feature_names=scroll_features,
+            scroll=imposter_scroll.squeeze(0),
+            out_dir=os.path.join(out_dir, "integrated_gradients", f"user_{user_id}", "impostor_scroll") if out_dir else None
+        )
+        if imposter_imu_attr is not None:
+            Xai._plot_attribution_analysis(
+                imposter_imu_attr,
+                title_prefix=f"Impostor IMU (to user {user_id})",
+                feature_names=imu_features,
+                scroll=imposter_scroll.squeeze(0).repeat_interleave(2, dim=0),
+                out_dir=os.path.join(out_dir, "integrated_gradients", f"user_{user_id}", "impostor_imu") if out_dir else None
+            )
+
+    def aggregate_integrated_gradients(
+        feature_embeddings, 
+        test_dataset: HUMITestDataset,
+        model: BehaveFormer, 
+        num_enroll_sessions, 
+        distance_type="euclidean",
+        out_dir: Optional[str] = None
+    ):
+        """
+        Calculates the mean normalized feature importance across all users
+        in the test set.
+        
+        feature_embeddings: Must be the reshaped tensor 
+                            (num_users, num_sessions, num_seqs, feature_dim)
+        """
+        num_users = test_dataset.num_users
+        all_scroll_feat_importances = []
+        all_imu_feat_importances = []
+        all_scroll_time_importances = []
+        all_imu_time_importances = []
+
+        # Get feature names from constants
+        scroll_features = Xai.SCROLL_FEATURE_NAMES
+        imu_features = Xai.IMU_FEATURE_NAMES
+        
+        print(f"Starting global ig attribution calculation for {num_users} users...")
+        
+        for user_id in range(num_users):
+            enroll_vectors = feature_embeddings[user_id, :num_enroll_sessions]
+
+            genuine_scroll, genuine_imu = test_dataset.get_sample_from_user(
+                user_id, 0, 0
+            )
+
+            genuine_scroll_attr, genuine_imu_attr = Xai.compute_integrated_gradients_negmean(
+                model,
+                scroll=genuine_scroll,
+                imu=genuine_imu,
+                enroll_vectors=enroll_vectors,
+                baseline_scroll=Xai.BASELINE_SCROLL,
+                baseline_imu=Xai.BASELINE_IMU,
+                distance_type=distance_type
+            )
+
+            # Collapse either dimension (feature / time)
+            # (F,)
+            scroll_feat_importance = genuine_scroll_attr.abs().mean(dim=0)
+            # (T,)
+            scroll_time_importance = genuine_scroll_attr.abs().mean(dim=1)
+            
+            # Normalize (so it sums to 1) and store
+            if scroll_feat_importance.sum() > 0:
+                all_scroll_feat_importances.append(scroll_feat_importance / scroll_feat_importance.sum())
+            if scroll_time_importance.sum() > 0:
+                all_scroll_time_importances.append(scroll_time_importance / scroll_time_importance.sum())
+
+            if genuine_imu_attr is not None:
+                imu_feat_importance = genuine_imu_attr.abs().mean(dim=0)
+                imu_time_importance = genuine_imu_attr.abs().mean(dim=1)
+                if imu_feat_importance.sum() > 0:
+                    all_imu_feat_importances.append(imu_feat_importance / imu_feat_importance.sum())
+                if imu_time_importance.sum() > 0:
+                    all_imu_time_importances.append(imu_time_importance / imu_time_importance.sum())
+
+        print("Starting aggregation...")
+
+        # --- Aggregate Scroll ---
+        mean_scroll_feat_importance = torch.stack(all_scroll_feat_importances, dim=0).mean(dim=0)
+        mean_scroll_time_importance = torch.stack(all_scroll_time_importances, dim=0).mean(dim=0)
+
+        # --- Aggregate IMU ---
+        mean_imu_feat_importance, mean_imu_time_importance = None, None
+        if len(all_imu_feat_importances) > 0:
+            mean_imu_feat_importance = torch.stack(all_imu_feat_importances, dim=0).mean(dim=0)
+            mean_imu_time_importance = torch.stack(all_imu_time_importances, dim=0).mean(dim=0)
+        
+        print("Aggregation done. Plotting...")
+        # --- Call the internal plotting function ---
+        Xai._plot_aggregated_attribution_analysis(
+            mean_scroll_feat_importance, mean_scroll_time_importance, scroll_features,
+            mean_imu_feat_importance, mean_imu_time_importance, imu_features,
+            out_dir=os.path.join(out_dir, "integrated_gradients", "aggregated_results") if out_dir else None
+        )
+
+    @staticmethod
+    def use_attention_rollout(
+        test_dataset: HUMITestDataset, 
+        model: BehaveFormer, 
+        user_id=0,
+        out_dir: Optional[str] = None
+    ):
+        """
+        Use attention rollout to get attention maps for scroll and imu.
+        """
+        scroll, imu = test_dataset.get_sample_from_user(user_id, 0, 0)
+
+        with torch.no_grad():
+            _, scroll_t_attn_maps, scroll_c_attn_maps = model.behave_transformer(scroll.float(), return_attn_weights=True)
+            if imu is not None:
+                _, imu_t_attn_maps, imu_c_attn_maps = model.imu_transformer(imu.float(), return_attn_weights=True)
+        
+        scroll_t_rollout = Xai.compute_attention_rollout(scroll_t_attn_maps).squeeze(0)
+        scroll_c_rollout = Xai.compute_attention_rollout(scroll_c_attn_maps).squeeze(0)
+        
+        imu_t_rollout, imu_c_rollout = None, None
+        if imu is not None:
+            imu_t_rollout = Xai.compute_attention_rollout(imu_t_attn_maps).squeeze(0)
+            imu_c_rollout = Xai.compute_attention_rollout(imu_c_attn_maps).squeeze(0)
+
+        # Get feature names from constants
+        scroll_features = Xai.SCROLL_FEATURE_NAMES if scroll_c_rollout.shape[0] == 8 else None
+        imu_features = Xai.IMU_FEATURE_NAMES if imu_c_rollout is not None and imu_c_rollout.shape[0] == 36 else None
+
+        # Visualize SCROLL
+        Xai._plot_attention_analysis(
+            scroll_t_rollout, scroll_c_rollout,
+            title_prefix=f"Scroll Attention Rollout (user {user_id})",
+            channel_feature_names=scroll_features,
+            out_dir=os.path.join(out_dir, "attention_rollout", f"user_{user_id}", "scroll_rollout") if out_dir else None
+        )
+
+        # Visualize IMU
+        Xai._plot_attention_analysis(
+            imu_t_rollout, imu_c_rollout,
+            title_prefix=f"IMU Attention Rollout (user {user_id})",
+            channel_feature_names=imu_features,
+            out_dir=os.path.join(out_dir, "attention_rollout", f"user_{user_id}", "imu_rollout") if out_dir else None
+        )
+
+    @staticmethod
+    def use_attention_flow(
+        test_dataset: HUMITestDataset, 
+        model: BehaveFormer, 
+        user_id=0,
+        out_dir: Optional[str] = None
+    ):
+        """
+        Use attention flow to get attention maps for scroll and imu.
+        """
+        # Get a sample from the dataset
+        scroll, imu = test_dataset.get_sample_from_user(user_id, 0, 0)
+
+        # Get the raw attention maps from the model
+        with torch.no_grad():
+            _, scroll_t_attn_maps, scroll_c_attn_maps = model.behave_transformer(scroll.float(), return_attn_weights=True)
+            if imu is not None:
+                _, imu_t_attn_maps, imu_c_attn_maps = model.imu_transformer(imu.float(), return_attn_weights=True)
+        
+        # Compute the attention flow matrices
+        scroll_t_flow = Xai.compute_attention_flow(scroll_t_attn_maps).squeeze(0)
+        scroll_c_flow = Xai.compute_attention_flow(scroll_c_attn_maps).squeeze(0)
+        
+        imu_t_flow, imu_c_flow = None, None
+        if imu is not None:
+            imu_t_flow = Xai.compute_attention_flow(imu_t_attn_maps).squeeze(0)
+            imu_c_flow = Xai.compute_attention_flow(imu_c_attn_maps).squeeze(0)
+
+        # Get feature names from constants
+        scroll_features = Xai.SCROLL_FEATURE_NAMES if scroll_c_flow.shape[0] == 8 else None
+        imu_features = Xai.IMU_FEATURE_NAMES if imu_c_flow is not None and imu_c_flow.shape[0] == 36 else None
+
+        # Visualize SCROLL (reusing the same plot helper)
+        Xai._plot_attention_analysis(
+            scroll_t_flow, scroll_c_flow,
+            title_prefix=f"Scroll (user {user_id}) - Attention Flow",
+            channel_feature_names=scroll_features,
+            out_dir=os.path.join(out_dir, "attention_flow", f"user_{user_id}", "scroll_flow") if out_dir else None
+        )
+
+        # Visualize IMU (reusing the same plot helper)
+        Xai._plot_attention_analysis(
+            imu_t_flow, imu_c_flow,
+            title_prefix=f"IMU (user {user_id}) - Attention Flow",
+            channel_feature_names=imu_features,
+            out_dir=os.path.join(out_dir, "attention_flow", f"user_{user_id}", "imu_flow") if out_dir else None
+        )
+
+    @staticmethod
+    def use_occlusion_sensitivity(
+        feature_embeddings, 
+        test_dataset: HUMITestDataset, 
+        model: BehaveFormer, 
+        num_enroll_sessions,
+        which: str,
+        user_id=0,
+        out_dir: Optional[str] = None
+    ):
+        enroll_vectors = feature_embeddings[user_id, :num_enroll_sessions]
+        genuine_scroll, genuine_imu = test_dataset.get_sample_from_user(user_id, 0, 0)
         
         model.eval()
         if genuine_imu is not None:
@@ -344,11 +617,12 @@ class Xai:
             test_vector, enroll_vectors, distance_type="euclidean"
         )
         out = {}
+        feat_dict = {name: idx for idx, name in enumerate(Xai.IMU_FEATURE_NAMES)} if which == "imu" else {name: idx for idx, name in enumerate(Xai.SCROLL_FEATURE_NAMES)}
         for name, idxs in feat_dict.items():
             if which == "imu" and genuine_imu is not None:
-                masked_input = [genuine_scroll.float(), Xai.mask_channels(genuine_imu, idxs, baseline=baseline).float()]
+                masked_input = [genuine_scroll.float(), Xai.mask_channels(genuine_imu, idxs, baseline=Xai.BASELINE_IMU).float()]
             elif which == "scroll":
-                masked_scroll = Xai.mask_channels(genuine_scroll, idxs, baseline=baseline).float()
+                masked_scroll = Xai.mask_channels(genuine_scroll, idxs, baseline=Xai.BASELINE_SCROLL).float()
                 masked_input = [masked_scroll, genuine_imu.float()] if genuine_imu is not None else masked_scroll
             else:
                 continue
@@ -358,34 +632,124 @@ class Xai:
                 model_output, enroll_vectors, distance_type="euclidean"
             ).item()
             out[name] = s0 - s_mask
-
-        plt.figure(figsize=(8, 2.2))
-        plt.plot(list(out.values()))
-        plt.xlabel("feature")
-        plt.xticks(np.arange(len(out)), list(out.keys()))
-        plt.ylabel("similarity drop")
-        plt.tight_layout()
-        plt.show()
-        return out
         
-    @staticmethod
-    def compute_similarity_score(test_vector, enroll_vectors, distance_type="euclidean"):
-        """
-        Compute similarity score between test_vector and enroll_vectors. 
-        The score is such that the higher the score, the more similar.
+        # --- Plotting ---
+        feature_names = list(out.keys())
+        attr = torch.tensor(list(out.values()))
 
-        test_vector: (1, F)
-        enroll_vectors: (E, F)
+        out_path = os.path.join(out_dir, "occlusion_sensitivity", f"user_{user_id}", f"{which}.png") if out_dir else None
+        plot_occlusion_sensitivity(
+            attr=attr,
+            title=f"Occlusion Sensitivity (User {user_id}, {which})",
+            xticklabels=feature_names,
+            y_label="similarity drop",
+            out_path=out_path
+        )
+    
+    @staticmethod
+    def aggregate_occlusion_sensitivity(
+        feature_embeddings, 
+        test_dataset: HUMITestDataset,
+        model: BehaveFormer, 
+        num_enroll_sessions,
+        which: str,
+        out_dir: Optional[str] = None
+    ):
         """
-        # Compute distance to each enrolment embedding
-        if distance_type == "euclidean":
-            # (E,) distances
-            dist = torch.linalg.norm(test_vector - enroll_vectors, dim=-1)  # broadcasting to (E, F)
-            score = -(dist.mean())                             # scalar
-        elif distance_type == "cosine":
-            t_norm = torch.nn.functional.normalize(test_vector, dim=1)      # (1, F)
-            E_norm = torch.nn.functional.normalize(enroll_vectors, dim=1)  # (E, F)
-            # Cosine distance = 1 - cos
-            cos_sim = torch.matmul(E_norm, t_norm.t()).squeeze()   # (E,)
-            score = cos_sim.mean()                                # negative cosine distance is just cos similarity
-        return score
+        Calculates the mean normalized occlusion sensitivity across all users
+        in the test set and plots the aggregated results.
+        
+        feature_embeddings: Must be the reshaped tensor 
+                            (num_users, num_sessions, num_seqs, feature_dim)
+        """
+        num_users = test_dataset.num_users
+        all_scores = []
+
+        # Get baseline and feature names
+        if which == "imu":
+            baseline = Xai.BASELINE_IMU
+            feature_names = Xai.IMU_FEATURE_NAMES
+            feat_dict = {name: idx for idx, name in enumerate(feature_names)}
+        else: # "scroll"
+            baseline = Xai.BASELINE_SCROLL
+            feature_names = Xai.SCROLL_FEATURE_NAMES
+            feat_dict = {name: idx for idx, name in enumerate(feature_names)}
+        
+        print(f"Starting global occlusion sensitivity calculation for {num_users} users (type: {which})...")
+        
+        for user_id in range(num_users):
+            enroll_vectors = feature_embeddings[user_id, :num_enroll_sessions]
+            genuine_scroll, genuine_imu = test_dataset.get_sample_from_user(user_id, 0, 0)
+            
+            model.eval()
+            if genuine_imu is not None:
+                test_vector = model([genuine_scroll.float(), genuine_imu.float()])
+            else:
+                test_vector = model(genuine_scroll.float())
+
+            s0 = Xai.compute_similarity_score(
+                test_vector, enroll_vectors, distance_type="euclidean"
+            )
+            
+            out = {}
+            for name, idxs in feat_dict.items():
+                if which == "imu" and genuine_imu is not None:
+                    masked_input = [genuine_scroll.float(), Xai.mask_channels(genuine_imu, idxs, baseline=baseline).float()]
+                elif which == "scroll":
+                    masked_scroll = Xai.mask_channels(genuine_scroll, idxs, baseline=baseline).float()
+                    masked_input = [masked_scroll, genuine_imu.float()] if genuine_imu is not None else masked_scroll
+                else:
+                    continue
+                
+                model_output = model(masked_input)
+                s_mask = Xai.compute_similarity_score(
+                    model_output, enroll_vectors, distance_type="euclidean"
+                ).item()
+                out[name] = s0 - s_mask
+
+            # Normalize and store scores
+            scores = torch.tensor(list(out.values()))
+            # We take abs() because a negative drop is also important (it means
+            # occluding the feature *helped* similarity, so it was important)
+            norm_scores = scores.abs() / (scores.abs().sum() + 1e-8)
+            all_scores.append(norm_scores)
+
+        print("Aggregation done. Plotting...")
+        
+        # --- Aggregate and Plot ---
+        mean_scores = torch.stack(all_scores, dim=0).mean(dim=0)
+        
+        sorted_indices = mean_scores.argsort(descending=True)
+        sorted_scores = mean_scores[sorted_indices]
+        sorted_names = [feature_names[i] for i in sorted_indices]
+        
+        plot_path = None
+        if out_dir:
+            agg_dir = os.path.join(out_dir, "occlusion_sensitivity", "aggregated_results")
+            os.makedirs(agg_dir, exist_ok=True)
+            plot_path = os.path.join(agg_dir, f"{which}_ranked.png")
+
+        plot_feature_profile(
+            sorted_scores.unsqueeze(0),
+            title=f"Global Occlusion Sensitivity (Ranked, {'IMU' if which == 'imu' else 'Scroll'})",
+            y_label="mean |Δoutput|",
+            feature_names=sorted_names,
+            signed=False,
+            out_path=plot_path
+        )
+
+    @staticmethod
+    def plot_scroll_x(
+        test_dataset: HUMITestDataset,
+        user_id_list: list[int],
+        out_dir: Optional[str] = None
+    ):
+        """
+        Plots the horizontal finger position over time for different users.
+        """
+        sess_idx = 0  # use first session for testing
+        user_to_scroll_x = {}
+        for user_id in user_id_list:
+            genuine_scroll, _ = test_dataset.get_sample_from_user(user_id, sess_idx, 0)
+            user_to_scroll_x[user_id] = genuine_scroll.squeeze(0)[:, 0]
+        plot_scroll_x_for_users(user_to_scroll_x, os.path.join(out_dir, "scroll_x_profiles.png") if out_dir else None)

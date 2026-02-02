@@ -173,6 +173,9 @@ def main(args):
                                          imu_type=imu_type)
         logger.info(f"INFO: Training on {train_dataset.dataset_name}")
 
+        scroll_mean, imu_mean = train_dataset.calculate_data_mean()
+        print(f"Scroll mean: {scroll_mean}, IMU mean: {imu_mean}")
+
         val_dataset = HUMITestDataset(action=action_type, 
                                       validation_file=os.path.join(config_data['folders']['root_dir'], config_data['folders']['data_dir'], 'validation_scroll_imu_data_all.pickle'),
                                       imu_type=imu_type)
