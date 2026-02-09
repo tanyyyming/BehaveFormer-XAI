@@ -1,6 +1,5 @@
-# pip install torch==2.0.1+cu118 torchaudio==2.0.2+cu118 torchdata==0.6.1 torchsummary==1.5.1 torchtext==0.15.2 torchvision==0.15.2+cu118 -f https://download.pytorch.org/whl/torch_stable.html
-# MacOS does not support CUDA, so we install the CPU version
-pip install torch==2.0.1 torchaudio==2.0.2 torchdata==0.6.1 torchsummary==1.5.1 torchtext==0.15.2 torchvision==0.15.2 -f https://download.pytorch.org/whl/torch_stable.html
+pip install torch==2.0.1+cu118 torchaudio==2.0.2+cu118 torchdata==0.6.1 torchsummary==1.5.1 torchtext==0.15.2 torchvision==0.15.2+cu118 -f https://download.pytorch.org/whl/torch_stable.html
+# pip install torch==2.0.1 torchaudio==2.0.2 torchdata==0.6.1 torchsummary==1.5.1 torchtext==0.15.2 torchvision==0.15.2 -f https://download.pytorch.org/whl/torch_stable.html
 pip install pandas==1.5.3
 pip install seaborn==0.12.2
 pip install scikit-learn==1.2.2
