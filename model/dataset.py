@@ -56,9 +56,15 @@ class BaseTrainDataset(Dataset):
         positive = self.load_data(genuine_user_idx, genuine_sess_2, genuine_seq_2)
         negative = self.load_data(imposter_user_idx, imposter_sess, imposter_seq)
 
+        anchor_meta = {
+            'user_idx': genuine_user_idx,
+            'sess_idx': genuine_sess_1,
+            'seq_idx': genuine_seq_1
+        }
+
         assert anchor[0].shape[1] == 8 and positive[0].shape[1] == 8 and negative[0].shape[1] == 8, f"scroll data must have dim 8, input shape is {anchor[0].shape}"
 
-        return anchor, positive, negative
+        return anchor, positive, negative, anchor_meta
 
     def convert_type(self, single_sequence: list[np.array, np.array]):
         """Convert data to required data format, e.g., float64"""

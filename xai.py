@@ -1,5 +1,7 @@
+import pickle
 import torch
 import numpy as np
+import torch.nn.functional as F
 from model.dataset import HUMITestDataset
 from model.behaveformer import BehaveFormer
 from utils.plot import *
@@ -753,3 +755,113 @@ class Xai:
             genuine_scroll, _ = test_dataset.get_sample_from_user(user_id, sess_idx, 0)
             user_to_scroll_x[user_id] = genuine_scroll.squeeze(0)[:, 0]
         plot_scroll_x_for_users(user_to_scroll_x, os.path.join(out_dir, "scroll_x_profiles.png") if out_dir else None)
+
+
+def project_prototypes(model, train_dataloader, device, epoch, save_dir, imu_type):
+    """
+    For hard-projecting prototypes onto real data after each epoch during prototype-based training.
+    1. Collects latent vectors from the training set.
+    2. Updates prototype weights to match the nearest real data.
+    3. Saves a 'Catalog' mapping prototype IDs to source metadata.
+    """
+    model.eval()
+
+    all_latents = []
+    all_meta = []
+
+    # 1. Collect Candidates (Latent Vectors) from Training Data
+    # We iterate through the dataloader to get a representative sample of the data distribution
+    with torch.no_grad():
+        for _, item in enumerate(train_dataloader):
+            # Unpack the new return tuple (Note the extra metadata arg)
+            anchor, _, _, anchor_meta = item
+
+            if imu_type != 'none':
+                _, latent_vector = model([anchor[0].to(device).float(), anchor[1].to(device).float()])
+            else:
+                _, latent_vector = model(anchor[0].to(device).float())
+
+            all_latents.append(latent_vector.cpu())
+
+            # Store metadata for each sample in this batch
+            # anchor_meta is a dict of lists (batch_size), we need to unroll it
+            batch_size = latent_vector.shape[0]
+            for b in range(batch_size):
+                meta_item = {
+                    'user_idx': anchor_meta['user_idx'][b].item(),
+                    'sess_idx': anchor_meta['sess_idx'][b].item(),
+                    'seq_idx': anchor_meta['seq_idx'][b].item()
+                }
+                all_meta.append(meta_item)
+
+    # Concatenate all collected latents: (N_samples, target_len)
+    all_latents = torch.cat(all_latents, dim=0)
+
+    # 2. Normalize for Cosine Similarity
+    # Shape: (N_samples, target_len)
+    candidates_norm = F.normalize(all_latents, p=2, dim=1)
+    # Shape: (num_prototypes, target_len)
+    prototypes_norm = F.normalize(model.prototype_layer.prototypes.data.cpu(), p=2, dim=1)
+
+    # 3. Calculate Similarity Matrix
+    # Shape: (num_prototypes, N_samples)
+    similarity_matrix = torch.mm(prototypes_norm, candidates_norm.t())
+
+    # 4. Find Nearest Neighbors
+    # For each prototype, find the index of the single best matching training sample
+    best_match_indices = torch.argmax(similarity_matrix, dim=1)
+
+    # 5. HARD UPDATE & CATALOGING
+    catalog = {}
+
+    for proto_idx, best_match_idx in enumerate(best_match_indices):
+        best_match_idx = best_match_idx.item()
+
+        # (1) Update the Prototype Weight to be exactly the real latent vector
+        # We use the ORIGINAL latent vector (not normalized) to preserve magnitude info if needed,
+        # though for cosine sim, direction is what matters.
+        new_weight = all_latents[best_match_idx]
+        model.prototype_layer.prototypes.data[proto_idx] = new_weight.to(device)
+
+        best_match_user_idx, best_match_sess_idx, best_match_seq_idx = (
+            all_meta[best_match_idx]["user_idx"],
+            all_meta[best_match_idx]["sess_idx"],
+            all_meta[best_match_idx]["seq_idx"],
+        )
+
+        raw_data = train_dataloader.dataset.load_data(
+            best_match_user_idx,
+            best_match_sess_idx,
+            best_match_seq_idx
+        )
+
+        # (2) Log the Projection Information
+        catalog[proto_idx] = {
+            "epoch": epoch,
+            "source_user": best_match_user_idx,
+            "source_session": best_match_sess_idx,
+            "source_seq": best_match_seq_idx,
+            "cosine_similarity": similarity_matrix[proto_idx, best_match_idx].item(),
+            "data": raw_data  # Store the actual raw data used for this prototype
+        }
+
+    # 6. Save the Catalog
+    master_catalog_path = os.path.join(save_dir, "prototype_catalog.pkl")
+    
+    # 1. Load existing master catalog if it exists
+    if os.path.exists(master_catalog_path):
+        try:
+            with open(master_catalog_path, 'rb') as f:
+                full_catalog = pickle.load(f)
+        except (EOFError, pickle.UnpicklingError):
+            # Handle corrupt/empty files safely
+            full_catalog = {}
+    else:
+        full_catalog = {}
+
+    # 2. Update with current epoch data
+    full_catalog[epoch] = catalog
+    
+    # 3. Write back to disk (Overwrite)
+    with open(master_catalog_path, 'wb') as f:
+        pickle.dump(full_catalog, f)

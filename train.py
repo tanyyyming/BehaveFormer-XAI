@@ -20,7 +20,7 @@ from model.behaveformer import BehaveFormer
 from evaluation.metrics import Metric
 from utils.config import Config
 from utils.utils import read_pickle, list2txt
-
+from xai import project_prototypes
 
 def set_random_seeds(seed: int):
     """
@@ -75,9 +75,9 @@ def evaluate(model, test_dataset, test_dataloader, target_len, number_of_enrollm
         feature_embeddings = []
         for batch_idx, item in enumerate(test_dataloader):
             if imu_type != 'none':
-                feature_embeddings.append(model([item[0].to(device).float(), item[1].to(device).float()]))
+                feature_embeddings.append(model([item[0].to(device).float(), item[1].to(device).float()])[0])
             else:
-                feature_embeddings.append(model(item[0].to(device).float()))
+                feature_embeddings.append(model(item[0].to(device).float())[0])
     
     if dataname == 'humi':
         eer = Metric.cal_user_eer_fixed_sessions(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, target_len), number_of_enrollment_sessions, number_of_verify_sessions)[0]
@@ -148,12 +148,14 @@ def main(args):
     behave_channel_heads = hyperparams['scroll_channel_heads']
     imu_temporal_heads = hyperparams['imu_temporal_heads']
     imu_channel_heads = hyperparams['imu_channel_heads']
+    num_prototypes = hyperparams['num_prototypes']
     imu_type = hyperparams['imu_type']
     if imu_type == 'none':
         assert hyperparams['num_imu'] == 0, "Check config file, num_imu must be 0 when imu_type is none"
     else:
         assert len(imu_type.split('_')) == hyperparams['num_imu'], "Check config file. imu_type and num_imu do not matched"
     imu_feature_dim = hyperparams['num_imu'] * 12
+    prototype_projection_epoch_interval = hyperparams['prototype_projection_epoch_interval']
     number_of_enrollment_sessions = hyperparams['number_of_enrollment_sessions']
     num_verify_sessions = hyperparams['number_of_verify_sessions'] if dataname == 'humi' else None  # If None, determined based on number of sessions for each user
 
@@ -173,8 +175,8 @@ def main(args):
                                          imu_type=imu_type)
         logger.info(f"INFO: Training on {train_dataset.dataset_name}")
 
-        scroll_mean, imu_mean = train_dataset.calculate_data_mean()
-        print(f"Scroll mean: {scroll_mean}, IMU mean: {imu_mean}")
+        # scroll_mean, imu_mean = train_dataset.calculate_data_mean()
+        # print(f"Scroll mean: {scroll_mean}, IMU mean: {imu_mean}")
 
         val_dataset = HUMITestDataset(action=action_type, 
                                       validation_file=os.path.join(config_data['folders']['root_dir'], config_data['folders']['data_dir'], 'validation_scroll_imu_data_all.pickle'),
@@ -207,7 +209,7 @@ def main(args):
    
     logger.info("INFO: Using BehaveFormer")
     print('imu_type', imu_type)
-    model = BehaveFormer(scroll_feature_dim, imu_feature_dim, scroll_sequence_len, imu_sequence_len, target_len, gre_k, behave_temporal_heads, behave_channel_heads, imu_temporal_heads, imu_channel_heads, imu_type=imu_type)
+    model = BehaveFormer(scroll_feature_dim, imu_feature_dim, scroll_sequence_len, imu_sequence_len, target_len, gre_k, behave_temporal_heads, behave_channel_heads, imu_temporal_heads, imu_channel_heads, num_prototypes, imu_type=imu_type)
     loss_fn = TripletLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.05)
 
@@ -264,17 +266,17 @@ def main(args):
         start = time.time()
         model.train(True)
         for batch_idx, item in enumerate(train_dataloader):
-            anchor, positive, negative = item
+            anchor, positive, negative, _ = item
             optimizer.zero_grad()
 
             if imu_type != 'none':
-                anchor_out = model([anchor[0].to(device).float(), anchor[1].to(device).float()])
-                positive_out = model([positive[0].to(device).float(), positive[1].to(device).float()])
-                negative_out = model([negative[0].to(device).float(), negative[1].to(device).float()])
+                anchor_out = model([anchor[0].to(device).float(), anchor[1].to(device).float()])[0]
+                positive_out = model([positive[0].to(device).float(), positive[1].to(device).float()])[0]
+                negative_out = model([negative[0].to(device).float(), negative[1].to(device).float()])[0]
             else:
-                anchor_out = model(anchor[0].to(device).float())
-                positive_out = model(positive[0].to(device).float())
-                negative_out = model(negative[0].to(device).float())
+                anchor_out = model(anchor[0].to(device).float())[0]
+                positive_out = model(positive[0].to(device).float())[0]
+                negative_out = model(negative[0].to(device).float())[0]
             loss = loss_fn(anchor_out, positive_out, negative_out)
             loss.backward()
             optimizer.step()
@@ -285,8 +287,26 @@ def main(args):
             if batch_idx == len(train_dataloader)-1:
                 t_loss = t_loss / len(train_dataloader)
   
-        eer = evaluate(model, val_dataset, val_dataloader, target_len, number_of_enrollment_sessions, num_verify_sessions, imu_type, device, dataname)
+        eer = evaluate(model, val_dataset, val_dataloader, num_prototypes, number_of_enrollment_sessions, num_verify_sessions, imu_type, device, dataname)
         end = time.time()
+        
+        # Prototype projection
+        has_done_projection = False
+        if ((i + 1) % prototype_projection_epoch_interval == 0) or ((i + 1) == epochs): # also project at the last epoch
+            project_prototypes(
+                model=model,
+                train_dataloader=train_dataloader,
+                device=device,
+                epoch=i+1,
+                save_dir=checkpoint_save_path,
+                imu_type=imu_type
+            )
+
+            logger.info(f"Projected prototypes & updated projection catalog up to epoch {i+1}")
+        
+            projection_time = time.time() - end
+            has_done_projection = True
+
         history['train']['loss'].append(t_loss)
         history['val']['eer'].append(eer)
         # Note: lr here is after 1 epoch (multiple batches) but warmup lr is done after each batch. However, we should still see an increase in lr
@@ -295,6 +315,9 @@ def main(args):
             logger.info(f"------> Epoch No: {i+1} - LR: {lr_scheduler.get_last_lr()[0]:>7f} - Loss: {t_loss:>7f} - EER: {eer:>7f} - Time: {end-start:>2f}")
         else:
             logger.info(f"------> Epoch No: {i+1} - Loss: {t_loss:>7f} - EER: {eer:>7f} - Time: {end-start:>2f}")
+        if has_done_projection:
+            logger.info(f"Prototype projection time: {projection_time:>2f} seconds")
+
         if (eer < g_eer):
             logger.info(f"EER improved from {g_eer} to {eer}")
             g_eer = eer

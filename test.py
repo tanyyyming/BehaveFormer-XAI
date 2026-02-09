@@ -291,9 +291,9 @@ if __name__ == "__main__":
         for batch_idx, item in enumerate(test_dataloader):
             # print(item[0].shape, item[1].shape)  # (64, 50, 8), (64, 100, 36)
             if imu_type != 'none':
-                feature_embeddings.append(model([item[0].to(device).float(), item[1].to(device).float()]))
+                feature_embeddings.append(model([item[0].to(device).float(), item[1].to(device).float()])[0])
             else:
-                feature_embeddings.append(model(item[0].to(device).float()))
+                feature_embeddings.append(model(item[0].to(device).float())[0])
 
     if dataname == 'humi':
         if "basic" in args.metric:
