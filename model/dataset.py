@@ -11,6 +11,7 @@ import pickle
 import numpy as np
 from torch.utils.data import Dataset
 import torch
+from typing import Optional
 
 class BaseTrainDataset(Dataset):
     """Train dataset that loads data during training"""
@@ -55,9 +56,15 @@ class BaseTrainDataset(Dataset):
         positive = self.load_data(genuine_user_idx, genuine_sess_2, genuine_seq_2)
         negative = self.load_data(imposter_user_idx, imposter_sess, imposter_seq)
 
+        anchor_meta = {
+            'user_idx': genuine_user_idx,
+            'sess_idx': genuine_sess_1,
+            'seq_idx': genuine_seq_1
+        }
+
         assert anchor[0].shape[1] == 8 and positive[0].shape[1] == 8 and negative[0].shape[1] == 8, f"scroll data must have dim 8, input shape is {anchor[0].shape}"
 
-        return anchor, positive, negative
+        return anchor, positive, negative, anchor_meta
 
     def convert_type(self, single_sequence: list[np.array, np.array]):
         """Convert data to required data format, e.g., float64"""
@@ -198,6 +205,27 @@ class HUMITrainDataset(BaseTrainDataset):
             ret_imu = self.data[user_idx][_sess_idx][seq_idx][1][:, self.imu_cols]
             return [ret_scroll, ret_imu]
 
+    def calculate_data_mean(self):
+        all_scroll_features = []
+        all_imu_features = []
+        # Calculate the mean of the dataset for every feature
+        for user_data in self.data:
+            for sess_data in user_data:
+                for seq_data in sess_data: 
+                    # seq_data is [scaled_scroll_array, scaled_imu_array]
+                    
+                    # Slicing from load_data
+                    scroll_feats = seq_data[0][:, 1:-1] 
+                    all_scroll_features.append(torch.from_numpy(scroll_feats))
+
+                    imu_feats = seq_data[1][:, self.imu_cols]
+                    all_imu_features.append(torch.from_numpy(imu_feats))
+        
+        scroll_mean = torch.cat(all_scroll_features, dim=0).mean(dim=0)
+        imu_mean = torch.cat(all_imu_features, dim=0).mean(dim=0)
+
+        return scroll_mean, imu_mean
+
     def load_data_all(self):
         # For HuMIdb: Load all data in
         with open(self.training_file, 'rb') as f:
@@ -331,6 +359,18 @@ class HUMITestDataset(BaseTestDataset):
             self.data[user_idx] = [user[i] for i in action_session]
             for idx, session in enumerate(self.data[user_idx]):
                 self.data[user_idx][idx] = session[:1]
+
+    def get_sample_from_user(self, user_idx, sess_idx=0, seq_idx=0) -> list[np.array, Optional[np.array]]:
+        """
+        Returns (scroll_tensor, imu_tensor_or_None) with batch dim added.
+        Shapes match the model inputs:
+            scroll: (1, 50, 8)
+            imu   : (1, 100, 36) or None if imu_type == 'none'
+        """
+        scroll_np, imu_np = self.data[user_idx][sess_idx][seq_idx]
+        scroll_t = torch.from_numpy(scroll_np[:, 1:-1]).unsqueeze(0)  # add batch dim
+        imu_t = None if self.imu_type == 'none' else torch.from_numpy(imu_np[:, self.imu_cols]).unsqueeze(0)
+        return scroll_t, imu_t
 
 class FETATrainDataset(BaseTrainDataset):
     DATASET_NAME = 'FETA'

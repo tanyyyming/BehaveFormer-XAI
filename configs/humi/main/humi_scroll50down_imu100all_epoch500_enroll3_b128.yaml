@@ -1,4 +1,4 @@
-GPU: "True"
+GPU: "False"
 data:
     scroll_sequence_len: 50
     imu_sequence_len: 100

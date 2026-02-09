@@ -1,4 +1,4 @@
-GPU: "True"
+GPU: "False"
 data:
     scroll_sequence_len: 50
     imu_sequence_len: 100
@@ -18,6 +18,8 @@ hyperparams:
     imu_channel_heads: 10
     imu_type: "none"  # each imu sensor has 12 features
     num_imu: 0
+    num_prototypes: 60
+    prototype_projection_epoch_interval: 5
     number_of_enrollment_sessions: 3
     number_of_verify_sessions: 2
     learning_rate: 0.001

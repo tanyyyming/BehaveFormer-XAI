@@ -1,5 +1,6 @@
 """BehaveFormer classes"""
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 class PositionalEncoding(nn.Module):
@@ -61,9 +62,15 @@ class TransformerEncoderLayer(nn.Module):
         
         self.final_norm = nn.LayerNorm(feature_dim)
 
-    def forward(self, src, src_mask=None):
-        src = self.attn_norm(src + self.temporal_attention(src, src, src)[0] + self.channel_attention(src.transpose(-1, -2), src.transpose(-1, -2), src.transpose(-1, -2))[0].transpose(-1, -2))
+    def forward(self, src, src_mask=None, return_attn_weights=False):
+        temporal_attn_output, temporal_attn_weights = self.temporal_attention(src, src, src, average_attn_weights=False)
+        channel_attn_output, channel_attn_weights = self.channel_attention(src.transpose(-1, -2), src.transpose(-1, -2), src.transpose(-1, -2), average_attn_weights=False)
+
+        src = self.attn_norm(src + temporal_attn_output + channel_attn_output.transpose(-1, -2))
         src = self.final_norm(src + self.cnn(src.unsqueeze(dim=1)).squeeze(dim=1))
+
+        if return_attn_weights:
+            return src, temporal_attn_weights, channel_attn_weights
             
         return src
 
@@ -75,11 +82,19 @@ class TransformerEncoder(nn.Module):
         for _ in range(num_layer):
             self.layers.append(TransformerEncoderLayer(feature_dim, temporal_heads, channel_heads, dropout, seq_len))
 
-    def forward(self, src):
+    def forward(self, src, return_attn_weights=False):
+        temp_attns, chan_attns = [], []
         for layer in self.layers:
-            src = layer(src)
-
-        return src
+            if return_attn_weights:
+                src, temp_attn, chan_attn = layer(src, return_attn_weights=True)
+                temp_attns.append(temp_attn) # (B, H_t, T, T), T = 50 for scroll, 100 for imu
+                chan_attns.append(chan_attn) # (B, H_c, F, F), F = 8 for scroll, 36 for imu
+            else:
+                src = layer(src)
+        if return_attn_weights:
+            return src, temp_attns, chan_attns
+        else:
+            return src
 
 class Transformer(nn.Module):
     def __init__(self, num_layer, feature_dim, gre_k, temporal_heads, channel_heads, seq_len, dropout, imu_type):
@@ -89,10 +104,35 @@ class Transformer(nn.Module):
 
         self.encoder = TransformerEncoder(feature_dim, temporal_heads, channel_heads, seq_len, num_layer, dropout)
 
-    def forward(self, inputs):
+    def forward(self, inputs, return_attn_weights=False):
         encoded_inputs = self.pos_encoding(inputs)
 
-        return self.encoder(encoded_inputs)
+        return self.encoder(encoded_inputs, return_attn_weights=return_attn_weights)
+
+
+class PrototypeLayer(nn.Module):
+    """
+    Addtional Prototype Layer for Ad-Hoc Explanability Enhancement
+    """
+    def __init__(self, num_prototypes, feature_dim):
+        super(PrototypeLayer, self).__init__()
+        # These are the "Shared Pool" of archetypes
+        # Shape: (50, 64) if num_prototypes=50, feature_dim=64
+        self.prototypes = nn.Parameter(torch.rand(num_prototypes, feature_dim))
+
+    def forward(self, x):
+        # x: (Batch, 64) - The latent vector from the linear layer
+        
+        # 1. Normalize Input and Prototypes (Required for Cosine Similarity)
+        # p=2 means L2 norm, dim=1 means across the feature dimension
+        x_norm = F.normalize(x, p=2, dim=1)
+        p_norm = F.normalize(self.prototypes, p=2, dim=1)
+        
+        # 2. Calculate Cosine Similarity via Matrix Multiplication
+        # (Batch, 64) x (64, 50) -> (Batch, 50)
+        similarity_scores = torch.mm(x_norm, p_norm.t())
+        
+        return similarity_scores
 
 class BehaveFormer(nn.Module):
     def __init__(self, 
@@ -105,7 +145,8 @@ class BehaveFormer(nn.Module):
                  behave_temporal_heads: int,    # e.g., 4 (scroll_channel_heads)
                  behave_channel_heads: int,     # e.g., 10
                  imu_temporal_heads: int,       # e.g., 6, same as original code
-                 imu_channel_heads: int,        # e.g., 10 
+                 imu_channel_heads: int,        # e.g., 10
+                 num_prototypes: int,           # e.g., 60 prototypes
                  imu_type: str='none',
                  num_layer: int=5,
                  dropout_enc: float=0.1,
@@ -136,6 +177,8 @@ class BehaveFormer(nn.Module):
             )
             self.linear_behave_imu = nn.Linear(target_len*2, target_len)
         
+        self.prototype_layer = PrototypeLayer(num_prototypes, target_len)
+        
     def forward(self, inputs):
         if self.imu_type != 'none':
             behave_inputs, imu_inputs = inputs
@@ -147,6 +190,15 @@ class BehaveFormer(nn.Module):
         if self.imu_type != 'none':
             imu_out = self.linear_imu(torch.flatten(self.imu_transformer(imu_inputs), start_dim=1, end_dim=2))
             concat_out = torch.concat([behave_out, imu_out], dim=-1)
-            return self.linear_behave_imu(concat_out)
+            latent_vector = self.linear_behave_imu(concat_out)
         else:
-            return behave_out
+            latent_vector = behave_out
+
+        # Pass through Prototype Layer
+        similarity_vec = self.prototype_layer(latent_vector)
+
+        # 3. Return BOTH
+        # - similarity_vec: Use this for Triplet Loss and Verification (EER)
+        # - latent_vector:  Use this ONLY for the "Hard Projection" training step
+        return similarity_vec, latent_vector
+        
