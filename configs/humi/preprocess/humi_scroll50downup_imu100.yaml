@@ -1,7 +1,7 @@
 dataname: "humi"
 preprocess:
-    dataset_root: "/data/kimngan/BehaveFormer/Humidb/raw/HuMI"
-    output_dir: "/data/kimngan/BehaveFormer/Humidb"
+    dataset_root: "./data/humidb/raw/HuMI"
+    output_dir: "./data/humidb"
     dataset_config:
         scroll_sequence_len: 50
         imu_sequence_len: 100

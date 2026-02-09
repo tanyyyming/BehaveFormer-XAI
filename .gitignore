@@ -11,3 +11,6 @@ __pycache__/
 data/
 work_dirs*/
 figures/
+
+# MacOS specific files
+.DS_Store

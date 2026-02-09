@@ -1,0 +1,8 @@
+Python: /home/t/tanyim/anaconda3/envs/BehaveFormer/bin/python
+CUDA_VISIBLE_DEVICES: 0
+Running with scroll up and all
+CUDA_VISIBLE_DEVICES=0 python train.py --dataname humi -c configs/humi/main/humi_scroll50up_imu100all_epoch500_enroll3_b128.yaml
+INFO: Input argument: Namespace(dataname='humi', config='configs/humi/main/humi_scroll50up_imu100all_epoch500_enroll3_b128.yaml', mode='from_scratch', debug=False, work_dirs_subfolder='', checkpoint_interval=100)
+work_dir /home/t/tanyim/BehaveFormer-XAI/work_dirs/humi_scroll50up_imu100all_epoch500_enroll3_b128/20250912_152846
+imu_type acc_gyr_mag
+Total time: 695.0472 minutes.
