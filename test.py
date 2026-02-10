@@ -234,6 +234,7 @@ if __name__ == "__main__":
     behave_channel_heads = hyperparams['scroll_channel_heads']
     imu_temporal_heads = hyperparams['imu_temporal_heads']
     imu_channel_heads = hyperparams['imu_channel_heads']
+    num_prototypes = hyperparams['num_prototypes']
     imu_type = hyperparams['imu_type']
     if imu_type == 'none':
         assert hyperparams['num_imu'] == 0, "Check config file, num_imu must be 0 when imu_type is none"
@@ -267,7 +268,7 @@ if __name__ == "__main__":
         test_dataloader = DataLoader(test_dataset, batch_size=batch_size, num_workers=4)  
 
     # Create model and load weights
-    model = BehaveFormer(scroll_feature_dim, imu_feature_dim, scroll_sequence_len, imu_sequence_len, target_len, gre_k, behave_temporal_heads, behave_channel_heads, imu_temporal_heads, imu_channel_heads, imu_type=imu_type)
+    model = BehaveFormer(scroll_feature_dim, imu_feature_dim, scroll_sequence_len, imu_sequence_len, target_len, gre_k, behave_temporal_heads, behave_channel_heads, imu_temporal_heads, imu_channel_heads, num_prototypes, imu_type=imu_type)
     if args.trained_weights_pt is None:
         best_epoch = max([int(i.split('_')[1]) for i in os.listdir(os.path.join(work_dir, 'best_models'))])
         tmp = [i for i in os.listdir(os.path.join(work_dir, 'best_models')) if i.startswith(f'epoch_{best_epoch}_eer_')]
@@ -297,23 +298,23 @@ if __name__ == "__main__":
 
     if dataname == 'humi':
         if "basic" in args.metric:
-            res = get_evaluate_results(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, target_len), number_of_enrollment_sessions, num_verify_sessions, dataset=dataname)
+            res = get_evaluate_results(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, num_prototypes), number_of_enrollment_sessions, num_verify_sessions, dataset=dataname)
             res_df = pd.DataFrame([list(res)], columns=["eer", "usability", "tcr", "frwi", "fawi"])
             logger.info(f"\nRESULTS\n{res_df}")
             res_df.to_csv(f"{results_path}/basic.csv", index=False)
         if "det" in args.metric:
-            Metric.save_DET_curve(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, target_len), number_of_enrollment_sessions, num_verify_sessions=num_verify_sessions, dataset=dataname, results_path=results_path)
+            Metric.save_DET_curve(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, num_prototypes), number_of_enrollment_sessions, num_verify_sessions=num_verify_sessions, dataset=dataname, results_path=results_path)
         if "pca" in args.metric:
             perplexity = 10
             logger.info(f"tSNE perplexity {perplexity}")
-            Metric.save_PCA_curve_fixed_sessions(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, target_len), number_of_enrollment_sessions + num_verify_sessions, 10, results_path, perplexity=perplexity)
+            Metric.save_PCA_curve_fixed_sessions(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, num_prototypes), number_of_enrollment_sessions + num_verify_sessions, 10, results_path, perplexity=perplexity)
         
         xai_out_dir = os.path.join(results_path, 'xai')
         if "ig" in xai_list:
             # Integrated Gradients with userid == 0 hardcoded for demo purpose
             for user_id in range(10):
-                Xai.use_integrated_gradients(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, target_len), test_dataset, model, number_of_enrollment_sessions, user_id=user_id, out_dir=xai_out_dir)
-            Xai.aggregate_integrated_gradients(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, target_len), test_dataset, model, number_of_enrollment_sessions, out_dir=xai_out_dir)
+                Xai.use_integrated_gradients(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, num_prototypes), test_dataset, model, number_of_enrollment_sessions, user_id=user_id, out_dir=xai_out_dir)
+            Xai.aggregate_integrated_gradients(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, num_prototypes), test_dataset, model, number_of_enrollment_sessions, out_dir=xai_out_dir)
         if "attn" in xai_list:
             # Attention Rollout with userid == 0 hardcoded for demo purpose
             for user_id in range(10):
@@ -323,10 +324,10 @@ if __name__ == "__main__":
             # Occlusion with userid == 0 hardcoded for demo purpose
             for which in ["scroll", "imu"]:
                 for user_id in range(10):
-                    Xai.use_occlusion_sensitivity(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, target_len), 
+                    Xai.use_occlusion_sensitivity(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, num_prototypes), 
                                                 test_dataset, model, number_of_enrollment_sessions, 
                                                 which=which, user_id=user_id, out_dir=xai_out_dir)
-                Xai.aggregate_occlusion_sensitivity(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, target_len),
+                Xai.aggregate_occlusion_sensitivity(torch.cat(feature_embeddings, dim=0).view(test_dataset.num_users, test_dataset.num_sessions, test_dataset.num_seqs, num_prototypes),
                                                     test_dataset, model, number_of_enrollment_sessions,
                                                     which=which, out_dir=xai_out_dir)
         if "others" in xai_list:
