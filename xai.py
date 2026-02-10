@@ -799,9 +799,9 @@ def project_prototypes(model, train_dataloader, device, epoch, save_dir, imu_typ
 
     # 2. Normalize for Cosine Similarity
     # Shape: (N_samples, target_len)
-    candidates_norm = F.normalize(all_latents, p=2, dim=1)
+    candidates_norm = F.normalize(all_latents, p=2, dim=1, eps=1e-6)
     # Shape: (num_prototypes, target_len)
-    prototypes_norm = F.normalize(model.prototype_layer.prototypes.data.cpu(), p=2, dim=1)
+    prototypes_norm = F.normalize(model.prototype_layer.prototypes.data.cpu(), p=2, dim=1, eps=1e-6)
 
     # 3. Calculate Similarity Matrix
     # Shape: (num_prototypes, N_samples)
