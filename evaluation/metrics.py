@@ -32,6 +32,11 @@ class Metric:
             threshold = threshold + paso
         
         gap = torch.abs(torch.tensor(far) - torch.tensor(frr))
+
+        if gap.numel() == 0:
+            print("WARNING: 'gap' tensor is empty! Model outputs might be NaN or constant.")
+            return 1.0, 1.0  # Return worst-case EER (100%) to prevent crash
+
         j = torch.nonzero(gap == torch.min(gap))
         index = j[0][0].item()
         return ((far[index]+frr[index])/2)*100, thresholds[index]
