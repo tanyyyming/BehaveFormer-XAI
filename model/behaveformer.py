@@ -165,7 +165,7 @@ class BehaveFormer(nn.Module):
             nn.ReLU(),
             nn.Dropout(dropout_linear),
             nn.Linear((behave_feature_dim * behave_len) // 2, target_len),
-            nn.ReLU()
+            # nn.ReLU()
         )
         if imu_type != 'none':
             self.linear_imu = nn.Sequential(
@@ -173,7 +173,7 @@ class BehaveFormer(nn.Module):
                 nn.ReLU(),
                 nn.Dropout(dropout_linear),
                 nn.Linear((imu_feature_dim * imu_len) // 2, target_len),
-                nn.ReLU()
+                # nn.ReLU()
             )
             self.linear_behave_imu = nn.Linear(target_len*2, target_len)
         
@@ -189,7 +189,7 @@ class BehaveFormer(nn.Module):
 
         if self.imu_type != 'none':
             imu_out = self.linear_imu(torch.flatten(self.imu_transformer(imu_inputs), start_dim=1, end_dim=2))
-            concat_out = torch.concat([behave_out, imu_out], dim=-1)
+            concat_out = torch.concat([F.relu(behave_out), F.relu(imu_out)], dim=-1)
             latent_vector = self.linear_behave_imu(concat_out)
         else:
             latent_vector = behave_out

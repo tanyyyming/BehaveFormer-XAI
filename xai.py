@@ -807,26 +807,40 @@ def project_prototypes(model, train_dataloader, device, epoch, save_dir, imu_typ
     # Shape: (num_prototypes, N_samples)
     similarity_matrix = torch.mm(prototypes_norm, candidates_norm.t())
 
-    # 4. Find Nearest Neighbors
-    # For each prototype, find the index of the single best matching training sample
-    best_match_indices = torch.argmax(similarity_matrix, dim=1)
-
-    # 5. HARD UPDATE & CATALOGING
+    # Mechanism to prevent repetitive projection of multiple prototypes onto the same training samples (mode collapse)
+    used_indices = set()
     catalog = {}
-
-    for proto_idx, best_match_idx in enumerate(best_match_indices):
-        best_match_idx = best_match_idx.item()
-
-        # (1) Update the Prototype Weight to be exactly the real latent vector
-        # We use the ORIGINAL latent vector (not normalized) to preserve magnitude info if needed,
-        # though for cosine sim, direction is what matters.
-        new_weight = all_latents[best_match_idx]
-        model.prototype_layer.prototypes.data[proto_idx] = new_weight.to(device)
+    
+    for i in range(model.prototype_layer.prototypes.shape[0]):
+        
+        # Get similarities for this prototype
+        sims = similarity_matrix[i] # Shape (N_samples,)
+        
+        # Sort candidates by similarity (descending)
+        sorted_indices = torch.argsort(sims, descending=True)
+        
+        best_idx = -1
+        for idx in sorted_indices:
+            idx = idx.item()
+            if idx not in used_indices:
+                best_idx = idx
+                break
+        
+        # If we ran out of data (unlikely), just pick the top one even if used
+        if best_idx == -1: best_idx = sorted_indices[0].item()
+        
+        # Mark as used so next prototype can't take it
+        used_indices.add(best_idx)
+        
+        # Update the Prototype Weight to be exactly the real latent vector
+        # We use the ORIGINAL latent vector (not normalized) to preserve magnitude info if needed
+        new_weight = all_latents[best_idx]
+        model.prototype_layer.prototypes.data[i].copy_(new_weight.to(device))
 
         best_match_user_idx, best_match_sess_idx, best_match_seq_idx = (
-            all_meta[best_match_idx]["user_idx"],
-            all_meta[best_match_idx]["sess_idx"],
-            all_meta[best_match_idx]["seq_idx"],
+            all_meta[best_idx]["user_idx"],
+            all_meta[best_idx]["sess_idx"],
+            all_meta[best_idx]["seq_idx"],
         )
 
         raw_data = train_dataloader.dataset.load_data(
@@ -836,12 +850,12 @@ def project_prototypes(model, train_dataloader, device, epoch, save_dir, imu_typ
         )
 
         # (2) Log the Projection Information
-        catalog[proto_idx] = {
+        catalog[i] = {
             "epoch": epoch,
             "source_user": best_match_user_idx,
-            "source_session": best_match_sess_idx,
+            "source_sess": best_match_sess_idx,
             "source_seq": best_match_seq_idx,
-            "cosine_similarity": similarity_matrix[proto_idx, best_match_idx].item(),
+            "cosine_similarity": similarity_matrix[i, best_idx].item(),
             "data": raw_data  # Store the actual raw data used for this prototype
         }
 
