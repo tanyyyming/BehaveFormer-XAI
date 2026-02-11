@@ -18,4 +18,4 @@ echo "Python: $(which python)"
 echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 
 # ==== run your script ====s
-bash scripts/humi/main/train.sh up all  
+bash scripts/humi/main/train.sh down none
