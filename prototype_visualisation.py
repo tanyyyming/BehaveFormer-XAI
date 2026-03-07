@@ -4,7 +4,7 @@ import numpy as np
 import os
 
 # --- Configuration ---
-CATALOG_PATH = "work_dirs/humi_scroll50down_imu100all_epoch500_enroll3_b128/20260210_000220/checkpoints/prototype_catalog.pkl"
+CATALOG_PATH = "work_dirs/humi_scroll50down_imu100all_epoch500_enroll3_b128/20260211_174037/checkpoints/prototype_catalog.pkl"
 OUTPUT_DIR = "prototype_vis"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -23,7 +23,7 @@ def visualize_clean_catalog(catalog_path, mode="grid"):
         full_catalog[list(full_catalog.keys())[0]], dict
     ):
         # last_epoch = max(full_catalog.keys())
-        target_epoch = 310  # Or use max(full_catalog.keys())
+        target_epoch = 200  # Or use max(full_catalog.keys())
         print(f"Visualizing Epoch {target_epoch}...")
         catalog = full_catalog[target_epoch]
     else:
@@ -104,25 +104,27 @@ def visualize_clean_catalog(catalog_path, mode="grid"):
             scroll_seq = entry["data"][0]
             imu_seq = entry["data"][1]
 
-            if pid == 27:
-                continue
+            # if pid == 27:
+            #     continue
             # Plot with low alpha (transparency) to see density
-            # plt.plot(scroll_seq[:, 0], alpha=0.6, linewidth=2, label=f"P{pid}")
-            plt.plot(imu_seq[:, 31], alpha=0.6, linewidth=2, label=f"P{pid}")
+            plt.plot(scroll_seq[:, 0], alpha=0.6, linewidth=2, label=f"P{pid}")
+            # plt.plot(imu_seq[:, 31], alpha=0.6, linewidth=2, label=f"P{pid}")
 
         plt.title(
-            f"Overlay of {num_unique} Unique Prototype Behaviors (Magnetometer fd_y)",
+            # f"Overlay of {num_unique} Unique Prototype Behaviors (Magnetometer fd_y)",
+            f"Overlay of {num_unique} Unique Prototype Behaviors (Finger Scroll X-Axis)",
             fontsize=14,
         )
         plt.xlabel("Time Step")
-        plt.ylabel("Magnetometer fd_y")
+        # plt.ylabel("Magnetometer fd_y")
+        plt.ylabel("Scroll Position (X-Axis)")
         plt.grid(True, alpha=0.3)
         plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize="small")
         plt.tight_layout()
-        plt.savefig(
-            os.path.join(OUTPUT_DIR, f"unique_overlay_epoch_{target_epoch}.png"),
-            dpi=150,
-        )
+        # plt.savefig(
+        #     os.path.join(OUTPUT_DIR, f"unique_overlay_epoch_{target_epoch}.png"),
+        #     dpi=150,
+        # )
 
     print("Done.")
     plt.show()
