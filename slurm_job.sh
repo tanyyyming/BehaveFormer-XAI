@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --gpus=1
+#SBATCH --gpus=1 --constraint=xgpf
 #SBATCH -c 8
 #SBATCH --mem=32G
 #SBATCH -t 15:00:00
