@@ -21,6 +21,7 @@ from model.behaveformer import BehaveFormer
 from utils.config import Config
 from utils.utils import read_pickle
 from imu_visualisation import get_phone_box
+from xai import project_prototypes
 
 
 # --- Configuration ---
@@ -868,6 +869,8 @@ def main():
     # else:
     #     model.load_state_dict(checkpoint)
 
+    # project_prototypes(model, train_dataloader, device, epoch=220, save_dir=CATALOG_PATH.removesuffix("prototype_catalog.pkl"), imu_type=imu_type)
+    
     # # 6. Run Visualizations
     # visualize_pure_latent_spread(
     #     model,
@@ -884,9 +887,11 @@ def main():
     #     CATALOG_PATH, prototypes_to_plot=[0, 3, 5, 10], target_epoch=220, type="Different"
     # )
     animate_prototype_neighbors_3d(CATALOG_PATH, prototype_id=0, target_epoch=220)
+    # animate_prototype_neighbors(CATALOG_PATH, prototype_id=3, target_epoch=220)
+    # animate_prototype_neighbors(CATALOG_PATH, prototype_id=5, target_epoch=220)
+    # animate_prototype_neighbors(CATALOG_PATH, prototype_id=6, target_epoch=220)
     # animate_prototype_neighbors(CATALOG_PATH, prototype_id=8, target_epoch=220)
     # animate_prototype_neighbors(CATALOG_PATH, prototype_id=15, target_epoch=220)
-
 
 if __name__ == "__main__":
     main()

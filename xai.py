@@ -839,13 +839,36 @@ def project_prototypes(model, train_dataloader, device, epoch, save_dir, imu_typ
 
         # --- Extract Top-K Neighbors ---
         neighbors_list = []
-    
+        
+        # 1. Track the unique physical sequences we have already added
+        seen_signatures = set()
+        
+        # Add the best_idx's signature first so we don't duplicate it
+        best_u = all_meta[best_idx]["user_idx"]
+        best_s = all_meta[best_idx]["sess_idx"]
+        best_q = all_meta[best_idx]["seq_idx"]
+        seen_signatures.add((best_u, best_s, best_q))
+        
         top_k_indices = [best_idx]
+        
+        # 2. Iterate through candidates and skip identical physical sequences
         for idx in sorted_indices:
             idx = idx.item()
             if idx == best_idx:
                 continue
-            top_k_indices.append(idx)
+                
+            # Get the metadata signature for this candidate
+            u = all_meta[idx]["user_idx"]
+            s = all_meta[idx]["sess_idx"]
+            q = all_meta[idx]["seq_idx"]
+            sig = (u, s, q)
+            
+            # Only add it if we haven't seen this EXACT sequence yet
+            if sig not in seen_signatures:
+                seen_signatures.add(sig)
+                top_k_indices.append(idx)
+                
+            # Stop once we have 5 UNIQUE neighbors
             if len(top_k_indices) >= k_neighbors:
                 break
                 
