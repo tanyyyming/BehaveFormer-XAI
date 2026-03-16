@@ -1,3 +1,4 @@
+import math
 import os
 import argparse
 import pickle
@@ -11,12 +12,15 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import matplotlib.animation as animation
 from adjustText import adjust_text
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from ahrs.filters import Madgwick
+from scipy.spatial.transform import Rotation as R
 
-# Import your existing modules
 from model.dataset import HUMITrainDataset, FETATrainDataset
 from model.behaveformer import BehaveFormer
 from utils.config import Config
 from utils.utils import read_pickle
+from imu_visualisation import get_phone_box
 
 
 # --- Configuration ---
@@ -117,6 +121,237 @@ def _create_comet_animation(
     print(f"Generating animation with {max_frames} frames...")
     ani = animation.FuncAnimation(
         fig, update, frames=max_frames + 20, interval=200, blit=True
+    )
+    plt.show()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        ani.save(save_path, writer="pillow", fps=5)
+        print(f"Saved to {save_path}")
+
+
+def _create_sync_comet_3d_animation(
+    x_arrays, y_arrays, imu_arrays, titles, super_title, save_path, tail_length=5
+):
+    """Core rendering function handling synchronized 2D Scroll and 3D Phone animations."""
+    num_plots = len(x_arrays)
+    if num_plots == 0:
+        print("No valid data to animate.")
+        return
+
+    # Setup the plot axes: 1 row for scroll, 1 row for 3D phone, 1 row for gyro, 1 row for mag fd
+    fig = plt.figure(figsize=(4 * num_plots, 16))
+
+    axes_scroll, axes_3d, axes_gyr, axes_mag = [], [], [], []
+    lines, dots, phones, normal_arrows = [], [], [], []
+    gyr_cursors, mag_cursors = [], []  # Track the moving vertical lines
+    max_frames = max([len(x) for x in x_arrays] + [len(i) for i in imu_arrays] + [0])
+    all_quats = []
+
+    # 1. Pre-compute Quaternions (Doing this inside the animation loop is too slow)
+    print("Pre-computing 3D sensor fusion...")
+    for imu_seq in imu_arrays:
+        # Reverse scaling based on dataset.py logic
+        acc = imu_seq[:, 0:3] * 10.0
+        gyr = imu_seq[:, 12:15]
+        mag = imu_seq[:, 24:27] * 1000.0
+
+        # THE FIX: Pass the arrays directly into the constructor!
+        # It automatically iterates through the sequence and returns the Nx4 array.
+        madgwick = Madgwick(acc=acc, gyr=gyr, mag=mag)
+        Q = madgwick.Q
+
+        all_quats.append(Q)
+
+    # 2. Setup the Subplots
+    for idx in range(num_plots):
+        # --- Row 1: 2D Scroll ---
+        ax_s = fig.add_subplot(4, num_plots, idx + 1)
+        (line,) = ax_s.plot([], [], color="royalblue", linewidth=2.5, alpha=0.8)
+        (dot,) = ax_s.plot(
+            [], [], "ro", markersize=10, zorder=5, label="Finger" if idx == 0 else ""
+        )
+        lines.append(line)
+        dots.append(dot)
+
+        ax_s.set_xlim([0.0, 1.0])
+        ax_s.set_ylim([0.0, 1.0])
+        ax_s.invert_yaxis()
+        ax_s.set_aspect(19.5 / 9.0)
+        ax_s.set_title(titles[idx], fontsize=10, fontweight="bold")
+        ax_s.grid(True, linestyle="--", alpha=0.4)
+        if idx == 0:
+            ax_s.legend(loc="upper right")
+        axes_scroll.append(ax_s)
+
+        # --- Row 2: 3D Phone ---
+        ax_3d = fig.add_subplot(4, num_plots, idx + 1 + num_plots, projection="3d")
+        ax_3d.set_xlim([-0.6, 0.6])
+        ax_3d.set_ylim([-0.6, 0.6])
+        ax_3d.set_zlim([-0.6, 0.6])
+        ax_3d.set_xlabel("X")
+        ax_3d.set_ylabel("Y")
+        ax_3d.set_zlabel("Z")
+        ax_3d.set_title("Phone Orientation", fontsize=9)
+
+        # Drop the camera down to look more horizontally, making Roll/Pitch more obvious
+        ax_3d.view_init(elev=20, azim=45)
+
+        # Grab the Frame 0 Quaternion for initialisation of the phone model and arrow to avoid jumping cameras
+        Q = all_quats[idx]
+        rot = R.from_quat([Q[0, 1], Q[0, 2], Q[0, 3], Q[0, 0]])
+
+        vertices, faces = get_phone_box()
+        rotated_faces = [[rot.apply(v) for v in face] for face in faces]
+        phone = Poly3DCollection(
+            rotated_faces, alpha=0.3, facecolors="cyan", edgecolors="black"
+        )
+        ax_3d.add_collection3d(phone)
+        phones.append(phone)
+
+        pointer_tip = rot.apply([0, 0, 0.8])
+        normal_arrow = ax_3d.quiver(
+            0,
+            0,
+            0,
+            pointer_tip[0],
+            pointer_tip[1],
+            pointer_tip[2],
+            color="red",
+            arrow_length_ratio=0.3,
+            alpha=1.0,
+            zorder=10,
+        )
+        normal_arrows.append(normal_arrow)
+        axes_3d.append(ax_3d)
+
+        # --- Row 3: Gyroscope Setup ---
+        ax_g = fig.add_subplot(4, num_plots, idx + 1 + 2 * num_plots)
+        time_steps = np.arange(len(imu_arrays[idx]))
+        gyr_data = imu_arrays[idx][:, 12:15]  # Extract raw Gyro
+
+        ax_g.plot(time_steps, gyr_data[:, 0], label="X", color="tab:red", alpha=0.7)
+        # ax_g.plot(time_steps, gyr_data[:, 1], label="Y", color="tab:green", alpha=0.7)
+        # ax_g.plot(time_steps, gyr_data[:, 2], label="Z", color="tab:blue", alpha=0.7)
+
+        # Create the moving time cursor at frame 0
+        cursor_g = ax_g.axvline(x=0, color="black", linestyle="--", linewidth=1.5)
+        gyr_cursors.append(cursor_g)
+
+        ax_g.set_title("Gyroscope (rad/s)", fontsize=9)
+        ax_g.set_xlim([0, len(time_steps) - 1])
+        ax_g.grid(True, linestyle=":", alpha=0.6)
+        if idx == 0:
+            ax_g.legend(loc="upper right", fontsize=7)
+        axes_gyr.append(ax_g)
+
+        # --- Row 4: Magnetometer FD (1st Derivative) Setup ---
+        ax_m = fig.add_subplot(4, num_plots, idx + 1 + 3 * num_plots)
+
+        # Use 30:33 (mag fd)
+        mag_fd_data = imu_arrays[idx][:, 30:33]
+
+        # Plot the features exactly as the model sees them
+        # ax_m.plot(time_steps, mag_fd_data[:, 0], color="tab:red", alpha=0.7, label="X")
+        ax_m.plot(
+            time_steps, mag_fd_data[:, 1], color="tab:green", alpha=0.7, label="Y"
+        )
+        # ax_m.plot(time_steps, mag_fd_data[:, 2], color="tab:blue", alpha=0.7, label="Z")
+
+        # Create the moving time cursor at frame 0
+        cursor_m = ax_m.axvline(x=0, color="black", linestyle="--", linewidth=1.5)
+        mag_cursors.append(cursor_m)
+
+        ax_m.set_title(
+            "Magnetometer 1st Derivative (m_fd)", fontsize=9, fontweight="bold"
+        )
+        ax_m.set_xlim([0, len(time_steps) - 1])
+        ax_m.grid(True, linestyle=":", alpha=0.6)
+        if idx == 0:
+            ax_m.legend(loc="upper right", fontsize=7)
+        axes_mag.append(ax_m)
+
+    plt.suptitle(super_title, fontsize=16, fontweight="bold")
+    plt.tight_layout()
+
+    # 3. Synchronized Animation Update
+    def update(frame):
+        updated_artists = []
+        for i in range(num_plots):
+            len_s = len(x_arrays[i])
+            len_i = len(imu_arrays[i])
+
+            # 1. IMU drives the clock directly since IMU has longer sequences
+            fi = min(frame, len_i - 1)
+
+            # 2. Scroll maps proportionally to the IMU progress
+            progress = (fi + 1) / len_i
+            fs = math.ceil(progress * len_s) - 1
+
+            # --- Update 2D Scroll ---
+            if fs == len_s - 1:
+                start_idx = 0
+                lines[i].set_alpha(0.4)
+            else:
+                start_idx = max(0, fs - tail_length)
+                lines[i].set_alpha(0.8)
+
+            lines[i].set_data(
+                x_arrays[i][start_idx : fs + 1], y_arrays[i][start_idx : fs + 1]
+            )
+            dots[i].set_data([x_arrays[i][fs]], [y_arrays[i][fs]])
+
+            # --- Update 3D Phone ---
+            Q = all_quats[i]
+            rot = R.from_quat([Q[fi, 1], Q[fi, 2], Q[fi, 3], Q[fi, 0]])
+            vertices, faces = get_phone_box()
+            rotated_faces = [[rot.apply(v) for v in face] for face in faces]
+
+            phones[i].set_verts(rotated_faces)
+
+            # 1. Calculate the new tip of the arrow
+            pointer_tip = rot.apply([0, 0, 0.8])
+
+            # 2. Delete the old arrow from the plot
+            normal_arrows[i].remove()
+
+            # 3. Draw the brand new arrow and overwrite the list
+            normal_arrows[i] = axes_3d[i].quiver(
+                0,
+                0,
+                0,
+                pointer_tip[0],
+                pointer_tip[1],
+                pointer_tip[2],
+                color="red",
+                arrow_length_ratio=0.2,
+                alpha=1.0,
+                zorder=10,
+            )
+
+            updated_artists.extend([lines[i], dots[i], phones[i], normal_arrows[i]])
+
+            # --- Update Time Cursors for Gyr and Mag ---
+            # set_xdata moves the vertical line to the current IMU frame
+            gyr_cursors[i].set_xdata([fi])
+            mag_cursors[i].set_xdata([fi])
+
+            updated_artists.extend(
+                [
+                    lines[i],
+                    dots[i],
+                    phones[i],
+                    normal_arrows[i],
+                    gyr_cursors[i],
+                    mag_cursors[i],
+                ]
+            )
+
+        return updated_artists
+
+    print(f"Generating synchronized 3D animation with {max_frames} frames...")
+    ani = animation.FuncAnimation(
+        fig, update, frames=max_frames + 20, interval=150, blit=False
     )
     plt.show()
 
@@ -247,7 +482,7 @@ def visualize_clean_catalog(catalog_path, mode="grid"):
     plt.show()
 
 
-def animate_comet_trajectories(
+def animate_different_prototypes(
     catalog_path,
     prototypes_to_plot,
     target_epoch,
@@ -329,6 +564,44 @@ def animate_prototype_neighbors(
     super_title = f"Top {len(neighbors)} Neighbors for Prototype {prototype_id} (Epoch {target_epoch})"
     _create_comet_animation(
         x_arrays, y_arrays, titles, super_title, save_path, tail_length
+    )
+
+
+def animate_prototype_neighbors_3d(
+    catalog_path, prototype_id, target_epoch, tail_length=5
+):
+    """Extracts neighbors and passes BOTH Scroll and IMU data to the 3D animator."""
+    catalog = _load_catalog(catalog_path, target_epoch)
+    if not catalog or prototype_id not in catalog:
+        print(f"Error: Prototype {prototype_id} not found in epoch {target_epoch}!")
+        return
+
+    neighbors = catalog[prototype_id].get("neighbors", [])
+    if not neighbors:
+        return
+
+    x_arrays, y_arrays, imu_arrays, titles = [], [], [], []
+
+    for idx, n_data in enumerate(neighbors):
+        u, s, q = n_data["source_user"], n_data["source_sess"], n_data["source_seq"]
+        sim = n_data.get("cosine_similarity", 0.0)
+
+        try:
+            scroll_seq = n_data["data"][0]
+            imu_seq = n_data["data"][1]  # Extract the IMU data!
+
+            x_arrays.append(scroll_seq[:, 0])
+            y_arrays.append(scroll_seq[:, 1])
+            imu_arrays.append(imu_seq)
+            titles.append(f"Neighbor {idx+1}\n(U{u}, S{s}, Q{q})\nSim: {sim:.3f}")
+        except Exception as e:
+            print(f"Failed to load data for Neighbor {idx+1}. Error: {e}")
+
+    save_path = os.path.join(OUTPUT_DIR, f"prototype_{prototype_id}_neighbors_3D.gif")
+    super_title = f"Top {len(neighbors)} Neighbors for Prototype {prototype_id} (Epoch {target_epoch})"
+
+    _create_sync_comet_3d_animation(
+        x_arrays, y_arrays, imu_arrays, titles, super_title, save_path, tail_length
     )
 
 
@@ -604,15 +877,15 @@ def main():
     #     catalog_path=CATALOG_PATH,
     #     target_epoch=220,
     # )
-    # animate_comet_trajectories(
+    # animate_different_prototypes(
     #     CATALOG_PATH, prototypes_to_plot=[0, 6, 8, 15], target_epoch=220, type="Similar"
     # )
-    # animate_comet_trajectories(
+    # animate_different_prototypes(
     #     CATALOG_PATH, prototypes_to_plot=[0, 3, 5, 10], target_epoch=220, type="Different"
     # )
-    animate_prototype_neighbors(CATALOG_PATH, prototype_id=6, target_epoch=220)
-    animate_prototype_neighbors(CATALOG_PATH, prototype_id=8, target_epoch=220)
-    animate_prototype_neighbors(CATALOG_PATH, prototype_id=15, target_epoch=220)
+    animate_prototype_neighbors_3d(CATALOG_PATH, prototype_id=0, target_epoch=220)
+    # animate_prototype_neighbors(CATALOG_PATH, prototype_id=8, target_epoch=220)
+    # animate_prototype_neighbors(CATALOG_PATH, prototype_id=15, target_epoch=220)
 
 
 if __name__ == "__main__":
