@@ -144,7 +144,10 @@ def _create_sync_comet_3d_animation(
     fig = plt.figure(figsize=(4 * num_plots, 16))
 
     axes_scroll, axes_3d, axes_gyr, axes_mag = [], [], [], []
-    lines, dots, phones, normal_arrows = [], [], [], []
+    lines, dots, phones, normal_lines = [], [], [], []
+    r0_inverses = (
+        []
+    )  # <-- Track the inverse of Frame 0 for each plot so that every phone starts in the same relative orientation
     gyr_cursors, mag_cursors = [], []  # Track the moving vertical lines
     max_frames = max([len(x) for x in x_arrays] + [len(i) for i in imu_arrays] + [0])
     all_quats = []
@@ -157,10 +160,16 @@ def _create_sync_comet_3d_animation(
         gyr = imu_seq[:, 12:15]
         mag = imu_seq[:, 24:27] * 1000.0
 
-        # THE FIX: Pass the arrays directly into the constructor!
-        # It automatically iterates through the sequence and returns the Nx4 array.
         madgwick = Madgwick(acc=acc, gyr=gyr, mag=mag)
         Q = madgwick.Q
+
+        # Sanitize broken Quaternions
+        # Calculate the norm (length) of every quaternion in the sequence
+        norms = np.linalg.norm(Q, axis=1)
+        # Find any that are 0 length, or turned into NaNs from zero-padded sensor data
+        bad_quats = (norms < 1e-6) | np.isnan(norms)
+        # Override broken ones with a default "Identity" quaternion (ahrs expects [w, x, y, z])
+        Q[bad_quats] = [1.0, 0.0, 0.0, 0.0]
 
         all_quats.append(Q)
 
@@ -193,37 +202,30 @@ def _create_sync_comet_3d_animation(
         ax_3d.set_xlabel("X")
         ax_3d.set_ylabel("Y")
         ax_3d.set_zlabel("Z")
-        ax_3d.set_title("Phone Orientation", fontsize=9)
+        ax_3d.set_title("Relative Phone Orientation", fontsize=9)
 
-        # Drop the camera down to look more horizontally, making Roll/Pitch more obvious
-        ax_3d.view_init(elev=20, azim=45)
+        # Set the camera angle and remove axes for a cleaner look
+        ax_3d.view_init(elev=0, azim=-90)
+        ax_3d.set_axis_off()
 
         # Grab the Frame 0 Quaternion for initialisation of the phone model and arrow to avoid jumping cameras
         Q = all_quats[idx]
         rot = R.from_quat([Q[0, 1], Q[0, 2], Q[0, 3], Q[0, 0]])
 
+        # Calculate and save the inverse to "zero out" the starting position
+        r0_inverses.append(rot.inv())
+
         vertices, faces = get_phone_box()
-        rotated_faces = [[rot.apply(v) for v in face] for face in faces]
         phone = Poly3DCollection(
-            rotated_faces, alpha=0.3, facecolors="cyan", edgecolors="black"
+            faces, alpha=0.2, facecolors="cyan", edgecolors="black"
         )
         ax_3d.add_collection3d(phone)
         phones.append(phone)
 
-        pointer_tip = rot.apply([0, 0, 0.8])
-        normal_arrow = ax_3d.quiver(
-            0,
-            0,
-            0,
-            pointer_tip[0],
-            pointer_tip[1],
-            pointer_tip[2],
-            color="red",
-            arrow_length_ratio=0.3,
-            alpha=1.0,
-            zorder=10,
+        (normal_line,) = ax_3d.plot(
+            [0, 0], [0, 0], [0, 0.8], color="red", linewidth=3, zorder=10
         )
-        normal_arrows.append(normal_arrow)
+        normal_lines.append(normal_line)
         axes_3d.append(ax_3d)
 
         # --- Row 3: Gyroscope Setup ---
@@ -305,32 +307,18 @@ def _create_sync_comet_3d_animation(
             # --- Update 3D Phone ---
             Q = all_quats[i]
             rot = R.from_quat([Q[fi, 1], Q[fi, 2], Q[fi, 3], Q[fi, 0]])
+            # Apply the inverse of Frame 0 to keep the phone's starting orientation consistent across different sequences
+            rot = rot * r0_inverses[i]
             vertices, faces = get_phone_box()
             rotated_faces = [[rot.apply(v) for v in face] for face in faces]
 
             phones[i].set_verts(rotated_faces)
 
-            # 1. Calculate the new tip of the arrow
+            # Calculate the new tip position of the normal vector (pointing out of the screen) after rotation
             pointer_tip = rot.apply([0, 0, 0.8])
-
-            # 2. Delete the old arrow from the plot
-            normal_arrows[i].remove()
-
-            # 3. Draw the brand new arrow and overwrite the list
-            normal_arrows[i] = axes_3d[i].quiver(
-                0,
-                0,
-                0,
-                pointer_tip[0],
-                pointer_tip[1],
-                pointer_tip[2],
-                color="red",
-                arrow_length_ratio=0.2,
-                alpha=1.0,
-                zorder=10,
+            normal_lines[i].set_data_3d(
+                [0, pointer_tip[0]], [0, pointer_tip[1]], [0, pointer_tip[2]]
             )
-
-            updated_artists.extend([lines[i], dots[i], phones[i], normal_arrows[i]])
 
             # --- Update Time Cursors for Gyr and Mag ---
             # set_xdata moves the vertical line to the current IMU frame
@@ -342,7 +330,7 @@ def _create_sync_comet_3d_animation(
                     lines[i],
                     dots[i],
                     phones[i],
-                    normal_arrows[i],
+                    normal_lines[i],
                     gyr_cursors[i],
                     mag_cursors[i],
                 ]
@@ -523,6 +511,64 @@ def animate_different_prototypes(
         y_arrays,
         titles,
         f"Comet Tail Scroll Trajectories of {type} Prototypes (Epoch {target_epoch})",
+        save_path,
+        tail_length,
+    )
+
+
+def animate_different_prototypes_3d(
+    catalog_path,
+    prototypes_to_plot,
+    target_epoch,
+    type: Literal["Similar", "Different"],
+    tail_length=5,
+):
+    """Visualizes different prototypes side-by-side using the 4-row 3D and sensor dashboard."""
+    catalog = _load_catalog(catalog_path, target_epoch)
+    if not catalog:
+        return
+
+    x_arrays, y_arrays, imu_arrays, titles = [], [], [], []
+
+    for p_idx in prototypes_to_plot:
+        if p_idx not in catalog:
+            print(f"Warning: Prototype {p_idx} not found in catalog.")
+            continue
+
+        entry = catalog[p_idx]
+        u = entry["source_user"]
+        s = entry["source_sess"]
+        q = entry["source_seq"]
+
+        try:
+            scroll_seq = entry["data"][0]
+            imu_seq = entry["data"][1]  # Extract the IMU data!
+
+            x_arrays.append(scroll_seq[:, 0])
+            y_arrays.append(scroll_seq[:, 1])
+            imu_arrays.append(imu_seq)
+
+            titles.append(f"Prototype {p_idx}\n(User {u}, Sess {s}, Seq {q})")
+        except Exception as e:
+            print(f"Failed to load data for P{p_idx}. Error: {e}")
+
+    if not x_arrays:
+        print("No valid prototypes found to animate.")
+        return
+
+    save_path = os.path.join(
+        OUTPUT_DIR, f"comet_trajectories_{type.lower()}_prototypes_3D.gif"
+    )
+    super_title = (
+        f"Synchronized 3D Trajectories of {type} Prototypes (Epoch {target_epoch})"
+    )
+
+    _create_sync_comet_3d_animation(
+        x_arrays,
+        y_arrays,
+        imu_arrays,
+        titles,
+        super_title,
         save_path,
         tail_length,
     )
@@ -870,7 +916,7 @@ def main():
     #     model.load_state_dict(checkpoint)
 
     # project_prototypes(model, train_dataloader, device, epoch=220, save_dir=CATALOG_PATH.removesuffix("prototype_catalog.pkl"), imu_type=imu_type)
-    
+
     # # 6. Run Visualizations
     # visualize_pure_latent_spread(
     #     model,
@@ -880,18 +926,19 @@ def main():
     #     catalog_path=CATALOG_PATH,
     #     target_epoch=220,
     # )
-    # animate_different_prototypes(
-    #     CATALOG_PATH, prototypes_to_plot=[0, 6, 8, 15], target_epoch=220, type="Similar"
-    # )
-    # animate_different_prototypes(
-    #     CATALOG_PATH, prototypes_to_plot=[0, 3, 5, 10], target_epoch=220, type="Different"
-    # )
-    animate_prototype_neighbors_3d(CATALOG_PATH, prototype_id=0, target_epoch=220)
+    animate_different_prototypes_3d(
+        CATALOG_PATH, prototypes_to_plot=[0, 6, 8, 15], target_epoch=220, type="Similar"
+    )
+    animate_different_prototypes_3d(
+        CATALOG_PATH, prototypes_to_plot=[0, 3, 5, 10], target_epoch=220, type="Different"
+    )
+    # animate_prototype_neighbors_3d(CATALOG_PATH, prototype_id=8, target_epoch=220)
     # animate_prototype_neighbors(CATALOG_PATH, prototype_id=3, target_epoch=220)
     # animate_prototype_neighbors(CATALOG_PATH, prototype_id=5, target_epoch=220)
     # animate_prototype_neighbors(CATALOG_PATH, prototype_id=6, target_epoch=220)
     # animate_prototype_neighbors(CATALOG_PATH, prototype_id=8, target_epoch=220)
     # animate_prototype_neighbors(CATALOG_PATH, prototype_id=15, target_epoch=220)
+
 
 if __name__ == "__main__":
     main()
