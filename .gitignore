@@ -11,6 +11,7 @@ __pycache__/
 data/
 work_dirs*/
 figures/
+prototype_vis*/
 
 # MacOS specific files
 .DS_Store

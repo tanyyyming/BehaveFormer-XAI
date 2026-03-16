@@ -574,3 +574,35 @@ class FETATestDataset(BaseTestDataset):
         else: # Take imu columns corresponding to imu type
             ret[1] = torch.from_numpy(ret[1][:, self.imu_cols])
             return ret
+
+class ExhaustiveProjectionDataset(BaseTrainDataset):
+    """
+    A wrapper that forces exhaustive, sequential iteration over every single 
+    sequence in the dataset, bypassing the random Triplet generation.
+    """
+    def __init__(self, base_train_dataset: BaseTrainDataset):
+        self.base_train_dataset = base_train_dataset
+        self.flat_indices = []
+        
+        # Flatten the nested [user][session][num_sequences] map into a linear list
+        for u, sessions in enumerate(base_train_dataset.user_sess_seq):
+            for s, num_seqs in enumerate(sessions):
+                for q in range(num_seqs):
+                    self.flat_indices.append((u, s, q))
+
+    def __len__(self):
+        return len(self.flat_indices)
+
+    def __getitem__(self, idx):
+        u, s, q = self.flat_indices[idx]
+        
+        # Load the raw physical sequence directly
+        data = self.base_train_dataset.load_data(u, s, q)
+        
+        # Track the exact physical signature
+        meta = {
+            'user_idx': u,
+            'sess_idx': s,
+            'seq_idx': q
+        }
+        return data, meta
