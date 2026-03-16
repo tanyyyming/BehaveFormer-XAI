@@ -1,6 +1,8 @@
 import os
 import argparse
 import pickle
+from typing import Literal
+from xml.parsers.expat import model
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -20,6 +22,108 @@ from utils.utils import read_pickle
 # --- Configuration ---
 CATALOG_PATH = "work_dirs/humi_scroll50down_imu100all_epoch500_enroll3_b128/20260305_022958/checkpoints/prototype_catalog.pkl"
 OUTPUT_DIR = "prototype_vis"
+
+
+def _load_catalog(catalog_path, target_epoch=None):
+    """Helper to load the catalog and drill down to the correct epoch."""
+    print(f"Loading prototype catalog from {catalog_path}...")
+    with open(catalog_path, "rb") as f:
+        full_catalog = pickle.load(f)
+
+    if isinstance(list(full_catalog.keys())[0], int) and isinstance(
+        full_catalog[list(full_catalog.keys())[0]], dict
+    ):
+        epoch = target_epoch if target_epoch else max(full_catalog.keys())
+        print(f"Loading prototypes from Epoch {epoch}...")
+        if epoch not in full_catalog:
+            print(f"Error: Epoch {epoch} not found in catalog!")
+            return None
+        return full_catalog[epoch]
+    return full_catalog
+
+
+def _create_comet_animation(
+    x_arrays, y_arrays, titles, super_title, save_path, tail_length=5
+):
+    """Core rendering function handling all Matplotlib and Animation logic."""
+    num_plots = len(x_arrays)
+    if num_plots == 0:
+        print("No valid data to animate.")
+        return
+
+    # Setup the plot axes
+    fig, axes = plt.subplots(1, num_plots, figsize=(4 * num_plots, 6))
+    if num_plots == 1:
+        axes = [axes]
+
+    lines, dots = [], []
+    max_frames = max([len(x) for x in x_arrays] + [0])
+
+    for idx in range(num_plots):
+        ax = axes[idx]
+
+        # Initialize empty line (comet tail) and dot (finger)
+        (line,) = ax.plot([], [], color="royalblue", linewidth=2.5, alpha=0.8)
+        (dot,) = ax.plot(
+            [],
+            [],
+            "ro",
+            markersize=10,
+            zorder=5,
+            label="Finger Position" if idx == 0 else "",
+        )
+
+        lines.append(line)
+        dots.append(dot)
+
+        # Fix geometric distortion and lock to absolute screen coordinates
+        ax.set_xlim([0.0, 1.0])
+        ax.set_ylim([0.0, 1.0])
+        ax.invert_yaxis()
+        ax.set_aspect(19.5 / 9.0)
+
+        ax.set_title(titles[idx], fontsize=10, fontweight="bold")
+        ax.set_xlabel("Screen X")
+        ax.set_ylabel("Screen Y")
+        ax.grid(True, linestyle="--", alpha=0.4)
+        if idx == 0:
+            ax.legend(loc="upper right")
+
+    plt.suptitle(super_title, fontsize=16, fontweight="bold")
+    plt.tight_layout()
+
+    # --- Animation Update Function ---
+    def update(frame):
+        updated_artists = []
+        for i in range(num_plots):
+            f = min(frame, len(x_arrays[i]) - 1)
+
+            if f == len(x_arrays[i]) - 1:
+                start_idx = 0
+                lines[i].set_alpha(0.4)
+            else:
+                start_idx = max(0, f - tail_length)
+                lines[i].set_alpha(0.8)
+
+            lines[i].set_data(
+                x_arrays[i][start_idx : f + 1], y_arrays[i][start_idx : f + 1]
+            )
+            dots[i].set_data([x_arrays[i][f]], [y_arrays[i][f]])
+
+            updated_artists.extend([lines[i], dots[i]])
+
+        return updated_artists
+
+    print(f"Generating animation with {max_frames} frames...")
+    ani = animation.FuncAnimation(
+        fig, update, frames=max_frames + 20, interval=200, blit=True
+    )
+    plt.show()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        ani.save(save_path, writer="pillow", fps=5)
+        print(f"Saved to {save_path}")
 
 
 def visualize_clean_catalog(catalog_path, mode="grid"):
@@ -143,128 +247,100 @@ def visualize_clean_catalog(catalog_path, mode="grid"):
     plt.show()
 
 
-def animate_comet_trajectories(catalog_path, prototypes_to_plot, tail_length=5):
-    print(f"Loading prototype catalog from {catalog_path}...")
-    with open(catalog_path, "rb") as f:
-        full_catalog = pickle.load(f)
+def animate_comet_trajectories(
+    catalog_path,
+    prototypes_to_plot,
+    target_epoch,
+    type: Literal["Similar", "Different"],
+    tail_length=5,
+):
+    """Visualizes different prototypes side-by-side."""
+    catalog = _load_catalog(catalog_path, target_epoch)
+    if not catalog:
+        return
 
-    # Handle nested epoch dictionary if present
-    if isinstance(list(full_catalog.keys())[0], int) and isinstance(full_catalog[list(full_catalog.keys())[0]], dict):
-        target_epoch = max(full_catalog.keys())
-        catalog = full_catalog[target_epoch]
-    else:
-        catalog = full_catalog
+    x_arrays, y_arrays, titles = [], [], []
 
-    # Setup the plot axes
-    fig, axes = plt.subplots(1, len(prototypes_to_plot), figsize=(5 * len(prototypes_to_plot), 6))
-    if len(prototypes_to_plot) == 1:
-        axes = [axes]
-
-    # Store data for the animation loop
-    all_x = []
-    all_y = []
-    lines = []
-    dots = []
-    max_frames = 0
-
-    for idx, p_idx in enumerate(prototypes_to_plot):
-        ax = axes[idx]
-        
+    for p_idx in prototypes_to_plot:
         if p_idx not in catalog:
             print(f"Warning: Prototype {p_idx} not found in catalog.")
-            all_x.append(np.array([]))
-            all_y.append(np.array([]))
             continue
-            
+
         entry = catalog[p_idx]
         u = entry["source_user"]
-        s = entry.get("source_sess", entry.get("source_session"))
+        s = entry["source_sess"]
+        q = entry["source_seq"]
 
         try:
-            # Extract directly from the catalog's stored data
-            scroll_seq = entry["data"][0]  
-            raw_x = scroll_seq[:, 0]
-            raw_y = scroll_seq[:, 1]
-            
-            all_x.append(raw_x)
-            all_y.append(raw_y)
-            max_frames = max(max_frames, len(raw_x))
-            
-            # Initialize empty line (the comet tail) and dot (the finger)
-            line, = ax.plot([], [], color='royalblue', linewidth=2.5, alpha=0.8)
-            dot, = ax.plot([], [], 'ro', markersize=10, zorder=5, label='Finger Position')
-            
-            lines.append(line)
-            dots.append(dot)
-
-            # Lock to absolute screen coordinates [0, 1] for true physical scale
-            ax.set_xlim([0.0, 1.0])
-            ax.set_ylim([0.0, 1.0])
-            ax.invert_yaxis() # Phone screens have Y=0 at the top
-
-            # Fix the geometric distortion! 
-            # Aspect parameter = (Visual Height of 1 Unit) / (Visual Width of 1 Unit)
-            # 19.5 / 9 is a standard modern phone screen ratio (~2.16)
-            PHONE_ASPECT_RATIO = 19.5 / 9.0  
-            ax.set_aspect(PHONE_ASPECT_RATIO)
-
-            ax.set_title(f"Prototype {p_idx}\n(User {u}, Sess {s})", fontweight='bold')
-            ax.set_xlabel("Screen X")
-            ax.set_ylabel("Screen Y")
-            ax.grid(True, linestyle='--', alpha=0.4)
-            if idx == 0:
-                ax.legend(loc='upper right')
-
+            scroll_seq = entry["data"][0]
+            x_arrays.append(scroll_seq[:, 0])
+            y_arrays.append(scroll_seq[:, 1])
+            titles.append(f"Prototype {p_idx}\n(User {u}, Sess {s}, Seq {q})")
         except Exception as e:
             print(f"Failed to load data for P{p_idx}. Error: {e}")
-            all_x.append(np.array([]))
-            all_y.append(np.array([]))
 
-    plt.suptitle("Comet Tail Scroll Trajectories", fontsize=16, fontweight='bold')
-    plt.tight_layout()
-
-    # --- Animation Update Function ---
-    def update(frame):
-        updated_artists = []
-        for i in range(len(prototypes_to_plot)):
-            if len(all_x[i]) == 0:
-                continue
-            
-            # If one sequence finishes earlier than the others, hold it on its last frame
-            f = min(frame, len(all_x[i]) - 1)
-            
-            # The Magic Logic:
-            # If we reached the absolute end of the sequence, show the WHOLE trajectory.
-            # Otherwise, only show the recent `tail_length` window to hide the mess.
-            if f == len(all_x[i]) - 1:
-                start_idx = 0
-                lines[i].set_alpha(0.4) # Dim the final whole-trajectory slightly
-            else:
-                start_idx = max(0, f - tail_length)
-                lines[i].set_alpha(0.8)
-            
-            # Update the trailing line
-            lines[i].set_data(all_x[i][start_idx:f+1], all_y[i][start_idx:f+1])
-            
-            # Update the finger dot
-            dots[i].set_data([all_x[i][f]], [all_y[i][f]])
-            
-            updated_artists.extend([lines[i], dots[i]])
-            
-        return updated_artists
-
-    print(f"Generating animation with {max_frames} frames... This may take a minute.")
-    # Extra frames added to the end so it pauses on the fully revealed image before looping
-    ani = animation.FuncAnimation(fig, update, frames=max_frames + 20, interval=200, blit=True)
-    plt.show()
-    
-    # Save as GIF using Pillow
-    save_path = os.path.join(OUTPUT_DIR, "comet_trajectories.gif")
-    ani.save(save_path, writer='pillow', fps=5)
-    print(f"\nSaved animation to {save_path}!")
+    save_path = os.path.join(
+        OUTPUT_DIR, f"comet_trajectories_{type.lower()}_prototypes.gif"
+    )
+    _create_comet_animation(
+        x_arrays,
+        y_arrays,
+        titles,
+        f"Comet Tail Scroll Trajectories of {type} Prototypes (Epoch {target_epoch})",
+        save_path,
+        tail_length,
+    )
 
 
-def visualize_pure_latent_spread(model, dataloader, device, imu_type, num_samples=2000):
+def animate_prototype_neighbors(
+    catalog_path, prototype_id, target_epoch, tail_length=5
+):
+    """Visualizes the Top-K nearest neighbors for a SINGLE prototype side-by-side."""
+    catalog = _load_catalog(catalog_path, target_epoch)
+    if not catalog:
+        return
+
+    if prototype_id not in catalog:
+        print(f"Error: Prototype {prototype_id} not found in epoch {target_epoch}!")
+        return
+
+    neighbors = catalog[prototype_id].get("neighbors", [])
+    if not neighbors:
+        print(f"Error: No 'neighbors' key found for Prototype {prototype_id}.")
+        return
+
+    x_arrays, y_arrays, titles = [], [], []
+
+    for idx, n_data in enumerate(neighbors):
+        u, s, q = n_data["source_user"], n_data["source_sess"], n_data["source_seq"]
+        sim = n_data.get("cosine_similarity", 0.0)
+
+        try:
+            scroll_seq = n_data["data"][0]
+            x_arrays.append(scroll_seq[:, 0])
+            y_arrays.append(scroll_seq[:, 1])
+            titles.append(
+                f"Neighbor {idx+1}\n(User {u}, Sess {s}, Seq {q})\nSim: {sim:.3f}"
+            )
+        except Exception as e:
+            print(f"Failed to load data for Neighbor {idx+1}. Error: {e}")
+
+    save_path = os.path.join(OUTPUT_DIR, f"prototype_{prototype_id}_neighbors.gif")
+    super_title = f"Top {len(neighbors)} Neighbors for Prototype {prototype_id} (Epoch {target_epoch})"
+    _create_comet_animation(
+        x_arrays, y_arrays, titles, super_title, save_path, tail_length
+    )
+
+
+def visualize_pure_latent_spread(
+    model,
+    dataloader,
+    device,
+    imu_type,
+    num_samples=2000,
+    catalog_path=None,
+    target_epoch=None,
+):
     model.eval()
     all_latents = []
     samples_collected = 0
@@ -292,10 +368,62 @@ def visualize_pure_latent_spread(model, dataloader, device, imu_type, num_sample
     # Combine background data
     data_latents = np.concatenate(all_latents, axis=0)[:num_samples]
 
-    print("2. Extracting prototype weights...")
-    proto_weights = model.prototype_layer.prototypes.data.cpu()
+    print("2. Extracting prototype representations...")
+    num_protos = model.prototype_layer.prototypes.shape[0]
+
+    # --- Load physical anchors if catalog and epoch are provided ---
+    if catalog_path and target_epoch:
+        print(
+            f"   -> Loading physical data anchors from Catalog (Epoch {target_epoch})"
+        )
+        catalog = _load_catalog(catalog_path, target_epoch)
+        if not catalog:
+            print("   -> Failed to load catalog. Falling back to raw model weights.")
+            proto_weights = model.prototype_layer.prototypes.data.cpu()
+        else:
+            proto_latents = []
+
+            with torch.no_grad():
+                for i in range(num_protos):
+                    if i not in catalog:
+                        print(f"Warning: P{i} not in catalog. Using zeros.")
+                        proto_latents.append(
+                            np.zeros(model.prototype_layer.prototypes.shape[1])
+                        )
+                        continue
+
+                    raw_data = catalog[i]["data"]
+
+                    # Pass the exact physical sequence through the CURRENT model
+                    if imu_type != "none":
+                        scroll_tensor = (
+                            torch.as_tensor(raw_data[0]).unsqueeze(0).to(device).float()
+                        )
+                        imu_tensor = (
+                            torch.as_tensor(raw_data[1]).unsqueeze(0).to(device).float()
+                        )
+                        _, latent = model([scroll_tensor, imu_tensor])
+                    else:
+                        scroll_arr = (
+                            raw_data[0]
+                            if isinstance(raw_data, (tuple, list))
+                            else raw_data
+                        )
+                        scroll_tensor = (
+                            torch.as_tensor(scroll_arr).unsqueeze(0).to(device).float()
+                        )
+                        _, latent = model(scroll_tensor)
+
+                    proto_latents.append(latent.cpu().numpy()[0])
+
+            # Convert our physical latents to tensor so we can normalize exactly like before
+            proto_weights = torch.tensor(np.array(proto_latents))
+    else:
+        print("   -> Extracting raw floating weights directly from model.")
+        proto_weights = model.prototype_layer.prototypes.data.cpu()
+
+    # Normalize prototypes
     proto_weights = F.normalize(proto_weights, p=2, dim=1).numpy()
-    num_protos = proto_weights.shape[0]
 
     # Normalize data latents
     data_latents = data_latents / np.linalg.norm(data_latents, axis=1, keepdims=True)
@@ -341,21 +469,23 @@ def visualize_pure_latent_spread(model, dataloader, device, imu_type, num_sample
         texts = []
         for i in range(num_protos):
             text = ax.text(
-                proto_2d[i, 0], 
-                proto_2d[i, 1], 
-                f"P{i}", 
-                fontsize=11, 
-                fontweight="bold", 
-                color="darkred"
+                proto_2d[i, 0],
+                proto_2d[i, 1],
+                f"P{i}",
+                fontsize=11,
+                fontweight="bold",
+                color="darkred",
             )
             texts.append(text)
-            
+
         # Let adjust_text repel the labels and draw connecting lines
         adjust_text(
-            texts, 
-            ax=ax, 
-            arrowprops=dict(arrowstyle="-", color='gray', lw=0.8, alpha=0.7, shrinkA=5, shrinkB=2),
-            expand_points=(1.5, 1.5) # Adds a little extra breathing room around the stars
+            texts,
+            ax=ax,
+            arrowprops=dict(
+                arrowstyle="-", color="gray", lw=0.8, alpha=0.7, shrinkA=5, shrinkB=2
+            ),
+            expand_points=(1.5, 1.5),
         )
 
         ax.set_title(f"Perplexity = {p}")
@@ -366,7 +496,11 @@ def visualize_pure_latent_spread(model, dataloader, device, imu_type, num_sample
             ax.legend(loc="upper right")
 
     plt.suptitle(
-        "Pure Latent Space Spread of 16 Prototypes (No PCA)",
+        (
+            "Pure Latent Space Spread of 16 Prototypes" + f" (Epoch {target_epoch})"
+            if target_epoch
+            else ""
+        ),
         fontsize=16,
         fontweight="bold",
     )
@@ -462,9 +596,23 @@ def main():
     #     model.load_state_dict(checkpoint)
 
     # # 6. Run Visualizations
-    # visualize_pure_latent_spread(model, train_dataloader, device, imu_type)
-    # animate_comet_trajectories(CATALOG_PATH, prototypes_to_plot=[0, 6, 8, 15])
-    animate_comet_trajectories(CATALOG_PATH, prototypes_to_plot=[0, 3, 5, 10])
+    # visualize_pure_latent_spread(
+    #     model,
+    #     train_dataloader,
+    #     device,
+    #     imu_type,
+    #     catalog_path=CATALOG_PATH,
+    #     target_epoch=220,
+    # )
+    # animate_comet_trajectories(
+    #     CATALOG_PATH, prototypes_to_plot=[0, 6, 8, 15], target_epoch=220, type="Similar"
+    # )
+    # animate_comet_trajectories(
+    #     CATALOG_PATH, prototypes_to_plot=[0, 3, 5, 10], target_epoch=220, type="Different"
+    # )
+    animate_prototype_neighbors(CATALOG_PATH, prototype_id=6, target_epoch=220)
+    animate_prototype_neighbors(CATALOG_PATH, prototype_id=8, target_epoch=220)
+    animate_prototype_neighbors(CATALOG_PATH, prototype_id=15, target_epoch=220)
 
 
 if __name__ == "__main__":

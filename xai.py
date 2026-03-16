@@ -757,7 +757,7 @@ class Xai:
         plot_scroll_x_for_users(user_to_scroll_x, os.path.join(out_dir, "scroll_x_profiles.png") if out_dir else None)
 
 
-def project_prototypes(model, train_dataloader, device, epoch, save_dir, imu_type):
+def project_prototypes(model, train_dataloader, device, epoch, save_dir, imu_type, k_neighbors=5):
     """
     For hard-projecting prototypes onto real data after each epoch during prototype-based training.
     1. Collects latent vectors from the training set.
@@ -837,26 +837,45 @@ def project_prototypes(model, train_dataloader, device, epoch, save_dir, imu_typ
         new_weight = all_latents[best_idx]
         model.prototype_layer.prototypes.data[i].copy_(new_weight.to(device))
 
-        best_match_user_idx, best_match_sess_idx, best_match_seq_idx = (
-            all_meta[best_idx]["user_idx"],
-            all_meta[best_idx]["sess_idx"],
-            all_meta[best_idx]["seq_idx"],
-        )
-
-        raw_data = train_dataloader.dataset.load_data(
-            best_match_user_idx,
-            best_match_sess_idx,
-            best_match_seq_idx
-        )
+        # --- Extract Top-K Neighbors ---
+        neighbors_list = []
+    
+        top_k_indices = [best_idx]
+        for idx in sorted_indices:
+            idx = idx.item()
+            if idx == best_idx:
+                continue
+            top_k_indices.append(idx)
+            if len(top_k_indices) >= k_neighbors:
+                break
+                
+        # 3. Fetch the raw data and metadata for all K neighbors
+        for n_idx in top_k_indices:
+            u = all_meta[n_idx]["user_idx"]
+            s = all_meta[n_idx]["sess_idx"]
+            q = all_meta[n_idx]["seq_idx"]
+            
+            raw_data = train_dataloader.dataset.load_data(u, s, q)
+            
+            neighbors_list.append({
+                "source_user": u,
+                "source_sess": s,
+                "source_seq": q,
+                "cosine_similarity": similarity_matrix[i, n_idx].item(),
+                "data": raw_data
+            })
 
         # (2) Log the Projection Information
+        # We keep the root keys the same so your other visualization scripts don't break,
+        # but we add the new "neighbors" list for the cluster animation!
         catalog[i] = {
             "epoch": epoch,
-            "source_user": best_match_user_idx,
-            "source_sess": best_match_sess_idx,
-            "source_seq": best_match_seq_idx,
-            "cosine_similarity": similarity_matrix[i, best_idx].item(),
-            "data": raw_data  # Store the actual raw data used for this prototype
+            "source_user": neighbors_list[0]["source_user"],
+            "source_sess": neighbors_list[0]["source_sess"],
+            "source_seq": neighbors_list[0]["source_seq"],
+            "cosine_similarity": neighbors_list[0]["cosine_similarity"],
+            "data": neighbors_list[0]["data"],
+            "neighbors": neighbors_list
         }
 
     # 6. Save the Catalog
