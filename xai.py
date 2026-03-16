@@ -2,7 +2,8 @@ import pickle
 import torch
 import numpy as np
 import torch.nn.functional as F
-from model.dataset import HUMITestDataset
+from torch.utils.data import DataLoader
+from model.dataset import HUMITestDataset, ExhaustiveProjectionDataset
 from model.behaveformer import BehaveFormer
 from utils.plot import *
 
@@ -769,17 +770,24 @@ def project_prototypes(model, train_dataloader, device, epoch, save_dir, imu_typ
     all_latents = []
     all_meta = []
 
-    # 1. Collect Candidates (Latent Vectors) from Training Data
-    # We iterate through the dataloader to get a representative sample of the data distribution
-    with torch.no_grad():
-        for _, item in enumerate(train_dataloader):
-            # Unpack the new return tuple (Note the extra metadata arg)
-            anchor, _, _, anchor_meta = item
+    # --- 1. Create the Exhaustive Dataloader ---
+    # We wrap the existing dataset to bypass Triplet random sampling
+    exhaustive_dataset = ExhaustiveProjectionDataset(train_dataloader.dataset)
+    exhaustive_loader = DataLoader(exhaustive_dataset, batch_size=256, shuffle=False)
 
+    print(f"Projecting across {len(exhaustive_dataset)} total sequences exhaustively...")
+
+    # --- 2. Build the Latent Bank ---
+    with torch.no_grad():
+        for data, meta in exhaustive_loader:
+            # DataLoader automatically batches the lists returned by load_data
+            scroll = data[0].to(device).float()
+            
             if imu_type != 'none':
-                _, latent_vector = model([anchor[0].to(device).float(), anchor[1].to(device).float()])
+                imu = data[1].to(device).float()
+                _, latent_vector = model([scroll, imu])
             else:
-                _, latent_vector = model(anchor[0].to(device).float())
+                _, latent_vector = model(scroll)
 
             all_latents.append(latent_vector.cpu())
 
@@ -787,38 +795,32 @@ def project_prototypes(model, train_dataloader, device, epoch, save_dir, imu_typ
             # anchor_meta is a dict of lists (batch_size), we need to unroll it
             batch_size = latent_vector.shape[0]
             for b in range(batch_size):
-                meta_item = {
-                    'user_idx': anchor_meta['user_idx'][b].item(),
-                    'sess_idx': anchor_meta['sess_idx'][b].item(),
-                    'seq_idx': anchor_meta['seq_idx'][b].item()
-                }
-                all_meta.append(meta_item)
+                all_meta.append({
+                    'user_idx': meta['user_idx'][b].item(),
+                    'sess_idx': meta['sess_idx'][b].item(),
+                    'seq_idx': meta['seq_idx'][b].item()
+                })
 
     # Concatenate all collected latents: (N_samples, target_len)
     all_latents = torch.cat(all_latents, dim=0)
 
-    # 2. Normalize for Cosine Similarity
+    # --- 3. Normalize & Calculate Global Similarity ---
     # Shape: (N_samples, target_len)
     candidates_norm = F.normalize(all_latents, p=2, dim=1, eps=1e-6)
     # Shape: (num_prototypes, target_len)
     prototypes_norm = F.normalize(model.prototype_layer.prototypes.data.cpu(), p=2, dim=1, eps=1e-6)
-
-    # 3. Calculate Similarity Matrix
     # Shape: (num_prototypes, N_samples)
     similarity_matrix = torch.mm(prototypes_norm, candidates_norm.t())
 
-    # Mechanism to prevent repetitive projection of multiple prototypes onto the same training samples (mode collapse)
     used_indices = set()
     catalog = {}
-    
+
+    # --- 4. Assign Prototypes & Extract True Neighbors ---
     for i in range(model.prototype_layer.prototypes.shape[0]):
-        
-        # Get similarities for this prototype
-        sims = similarity_matrix[i] # Shape (N_samples,)
-        
-        # Sort candidates by similarity (descending)
+        sims = similarity_matrix[i]
         sorted_indices = torch.argsort(sims, descending=True)
         
+        # Greedy assignment to prevent mode collapse
         best_idx = -1
         for idx in sorted_indices:
             idx = idx.item()
@@ -826,53 +828,28 @@ def project_prototypes(model, train_dataloader, device, epoch, save_dir, imu_typ
                 best_idx = idx
                 break
         
-        # If we ran out of data (unlikely), just pick the top one even if used
         if best_idx == -1: best_idx = sorted_indices[0].item()
-        
-        # Mark as used so next prototype can't take it
         used_indices.add(best_idx)
         
-        # Update the Prototype Weight to be exactly the real latent vector
-        # We use the ORIGINAL latent vector (not normalized) to preserve magnitude info if needed
+        # Hard project the prototype weight
         new_weight = all_latents[best_idx]
         model.prototype_layer.prototypes.data[i].copy_(new_weight.to(device))
 
-        # --- Extract Top-K Neighbors ---
+        # --- Extract Top-K True Neighbors ---
         neighbors_list = []
         
-        # 1. Track the unique physical sequences we have already added
-        seen_signatures = set()
-        
-        # Add the best_idx's signature first so we don't duplicate it
-        best_u = all_meta[best_idx]["user_idx"]
-        best_s = all_meta[best_idx]["sess_idx"]
-        best_q = all_meta[best_idx]["seq_idx"]
-        seen_signatures.add((best_u, best_s, best_q))
-        
+        # We no longer need the signature deduplication loop. 
+        # Every index in the exhaustive loader is guaranteed unique.
         top_k_indices = [best_idx]
-        
-        # 2. Iterate through candidates and skip identical physical sequences
         for idx in sorted_indices:
             idx = idx.item()
             if idx == best_idx:
                 continue
-                
-            # Get the metadata signature for this candidate
-            u = all_meta[idx]["user_idx"]
-            s = all_meta[idx]["sess_idx"]
-            q = all_meta[idx]["seq_idx"]
-            sig = (u, s, q)
-            
-            # Only add it if we haven't seen this EXACT sequence yet
-            if sig not in seen_signatures:
-                seen_signatures.add(sig)
-                top_k_indices.append(idx)
-                
-            # Stop once we have 5 UNIQUE neighbors
+            top_k_indices.append(idx)
             if len(top_k_indices) >= k_neighbors:
                 break
                 
-        # 3. Fetch the raw data and metadata for all K neighbors
+        # Fetch the raw data and metadata for all K neighbors
         for n_idx in top_k_indices:
             u = all_meta[n_idx]["user_idx"]
             s = all_meta[n_idx]["sess_idx"]
@@ -888,9 +865,6 @@ def project_prototypes(model, train_dataloader, device, epoch, save_dir, imu_typ
                 "data": raw_data
             })
 
-        # (2) Log the Projection Information
-        # We keep the root keys the same so your other visualization scripts don't break,
-        # but we add the new "neighbors" list for the cluster animation!
         catalog[i] = {
             "epoch": epoch,
             "source_user": neighbors_list[0]["source_user"],
@@ -901,10 +875,9 @@ def project_prototypes(model, train_dataloader, device, epoch, save_dir, imu_typ
             "neighbors": neighbors_list
         }
 
-    # 6. Save the Catalog
+    # --- 5. Save the Catalog ---
     master_catalog_path = os.path.join(save_dir, "prototype_catalog.pkl")
     
-    # 1. Load existing master catalog if it exists
     if os.path.exists(master_catalog_path):
         try:
             with open(master_catalog_path, 'rb') as f:
@@ -915,9 +888,6 @@ def project_prototypes(model, train_dataloader, device, epoch, save_dir, imu_typ
     else:
         full_catalog = {}
 
-    # 2. Update with current epoch data
     full_catalog[epoch] = catalog
-    
-    # 3. Write back to disk (Overwrite)
     with open(master_catalog_path, 'wb') as f:
         pickle.dump(full_catalog, f)

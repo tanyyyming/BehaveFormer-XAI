@@ -26,7 +26,7 @@ from xai import project_prototypes
 
 # --- Configuration ---
 CATALOG_PATH = "work_dirs/humi_scroll50down_imu100all_epoch500_enroll3_b128/20260305_022958/checkpoints/prototype_catalog.pkl"
-OUTPUT_DIR = "prototype_vis"
+OUTPUT_DIR = "prototype_vis_exhaustive_search_no_pdl"
 
 
 def _load_catalog(catalog_path, target_epoch=None):
@@ -342,7 +342,7 @@ def _create_sync_comet_3d_animation(
     ani = animation.FuncAnimation(
         fig, update, frames=max_frames + 20, interval=150, blit=False
     )
-    plt.show()
+    # plt.show()
 
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -915,7 +915,7 @@ def main():
     # else:
     #     model.load_state_dict(checkpoint)
 
-    # project_prototypes(model, train_dataloader, device, epoch=220, save_dir=CATALOG_PATH.removesuffix("prototype_catalog.pkl"), imu_type=imu_type)
+    # # project_prototypes(model, train_dataloader, device, epoch=220, save_dir=CATALOG_PATH.removesuffix("prototype_catalog.pkl"), imu_type=imu_type)
 
     # # 6. Run Visualizations
     # visualize_pure_latent_spread(
@@ -932,12 +932,13 @@ def main():
     animate_different_prototypes_3d(
         CATALOG_PATH, prototypes_to_plot=[0, 3, 5, 10], target_epoch=220, type="Different"
     )
-    # animate_prototype_neighbors_3d(CATALOG_PATH, prototype_id=8, target_epoch=220)
-    # animate_prototype_neighbors(CATALOG_PATH, prototype_id=3, target_epoch=220)
-    # animate_prototype_neighbors(CATALOG_PATH, prototype_id=5, target_epoch=220)
-    # animate_prototype_neighbors(CATALOG_PATH, prototype_id=6, target_epoch=220)
-    # animate_prototype_neighbors(CATALOG_PATH, prototype_id=8, target_epoch=220)
-    # animate_prototype_neighbors(CATALOG_PATH, prototype_id=15, target_epoch=220)
+    animate_prototype_neighbors_3d(CATALOG_PATH, prototype_id=0, target_epoch=220)
+    animate_prototype_neighbors_3d(CATALOG_PATH, prototype_id=3, target_epoch=220)
+    animate_prototype_neighbors_3d(CATALOG_PATH, prototype_id=5, target_epoch=220)
+    animate_prototype_neighbors_3d(CATALOG_PATH, prototype_id=6, target_epoch=220)
+    animate_prototype_neighbors_3d(CATALOG_PATH, prototype_id=8, target_epoch=220)
+    animate_prototype_neighbors_3d(CATALOG_PATH, prototype_id=10, target_epoch=220)
+    animate_prototype_neighbors_3d(CATALOG_PATH, prototype_id=15, target_epoch=220)
 
 
 if __name__ == "__main__":
