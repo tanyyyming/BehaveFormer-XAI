@@ -326,25 +326,8 @@ def main(args):
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=0.05
     )
-
-    # Warmup learning rate from base_lr to target_lr (learning_rate) over warmup_epochs
-    base_lr = hyperparams["warmup_baselr"]
-    warmup_epochs = hyperparams["warmup_epochs"]
-    warmup_steps = (
-        len(train_dataloader) * warmup_epochs
-    )  # warmup is trigger after every batch so warmup_steps = #batch * #warmup_epochs
-    training_steps = len(train_dataloader) * (epochs - warmup_epochs)
-    lr_warmup = torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=float(base_lr / learning_rate), total_iters=warmup_steps
-    )
-    lr_constant = torch.optim.lr_scheduler.ConstantLR(
-        optimizer, factor=1, total_iters=training_steps
-    )
-    lr_schedule_list = [lr_warmup, lr_constant]
-    lr_scheduler = torch.optim.lr_scheduler.ChainedScheduler(lr_schedule_list)
-
-    logger.info(f"Number of epochs {epochs}")
     g_eer = math.inf
+
     # Either transfer learning (from a different dataset) or resume or train from scratch
     if args.mode == "transfer_learning":  # Load pretrain weights
         checkpoint_pt = config_data["folders"]["transfer_learning_weights"]
@@ -382,6 +365,25 @@ def main(args):
         epochs = init_epoch + epochs
         g_eer = init_eer
 
+
+    # Warmup learning rate from base_lr to target_lr (learning_rate) over warmup_epochs
+    base_lr = hyperparams["warmup_baselr"]
+    warmup_epochs = hyperparams["warmup_epochs"]
+    warmup_steps = (
+        len(train_dataloader) * warmup_epochs
+    )  # warmup is trigger after every batch so warmup_steps = #batch * #warmup_epochs
+    training_steps = len(train_dataloader) * (epochs - warmup_epochs)
+    lr_warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=float(base_lr / learning_rate), total_iters=warmup_steps
+    )
+    lr_constant = torch.optim.lr_scheduler.ConstantLR(
+        optimizer, factor=1, total_iters=training_steps
+    )
+    lr_schedule_list = [lr_warmup, lr_constant]
+    lr_scheduler = torch.optim.lr_scheduler.ChainedScheduler(lr_schedule_list)
+
+    logger.info(f"Number of epochs {epochs}")
+
     # MAIN WORK
     history = {
         "train": {"loss": []},
@@ -404,23 +406,24 @@ def main(args):
                 anchor_out, anchor_latent = model(
                     [anchor[0].to(device).float(), anchor[1].to(device).float()]
                 )
-                positive_out = model(
+                positive_out, positive_latent = model(
                     [positive[0].to(device).float(), positive[1].to(device).float()]
-                )[0]
-                negative_out = model(
+                )
+                negative_out, negative_latent = model(
                     [negative[0].to(device).float(), negative[1].to(device).float()]
-                )[0]
+                )
             else:
                 anchor_out, anchor_latent = model(anchor[0].to(device).float())
-                positive_out = model(positive[0].to(device).float())[0]
-                negative_out = model(negative[0].to(device).float())[0]
+                positive_out, positive_latent = model(positive[0].to(device).float())
+                negative_out, negative_latent = model(negative[0].to(device).float())
 
             # 1. Triplet loss
             triplet_loss = triplet_loss_fn(anchor_out, positive_out, negative_out)
 
             # 2. Prototype Structural loss
+            all_latents = torch.cat([anchor_latent, positive_latent, negative_latent], dim=0)
             r1_loss, r2_loss, pdl_loss = structural_loss_fn(
-                latents=anchor_latent, prototypes=model.prototype_layer.prototypes
+                latents=all_latents, prototypes=model.prototype_layer.prototypes
             )
 
             # 3. Combined loss with weighting
