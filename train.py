@@ -434,6 +434,24 @@ def main(args):
             t_loss = t_loss + loss.item()
             if batch_idx == len(train_dataloader) - 1:
                 t_loss = t_loss / len(train_dataloader)
+        
+        end_train = time.time()
+
+        # Project prototypes before evaluation!
+        has_done_projection = False
+        
+        if ((i + 1) % prototype_projection_epoch_interval == 0) or ((i + 1) == epochs):
+            project_prototypes(
+                model=model,
+                train_dataloader=train_dataloader,
+                device=device,
+                epoch=i + 1,
+                save_dir=checkpoint_save_path,
+                imu_type=imu_type,
+            )
+            has_done_projection = True
+            projection_time = time.time() - end_train
+            logger.info(f"Projected prototypes & updated projection catalog up to epoch {i+1}")
 
         eer = evaluate(
             model,
@@ -446,28 +464,6 @@ def main(args):
             device,
             dataname,
         )
-        end = time.time()
-
-        # Prototype projection
-        has_done_projection = False
-        if ((i + 1) % prototype_projection_epoch_interval == 0) or (
-            (i + 1) == epochs
-        ):  # also project at the last epoch
-            project_prototypes(
-                model=model,
-                train_dataloader=train_dataloader,
-                device=device,
-                epoch=i + 1,
-                save_dir=checkpoint_save_path,
-                imu_type=imu_type,
-            )
-
-            logger.info(
-                f"Projected prototypes & updated projection catalog up to epoch {i+1}"
-            )
-
-            projection_time = time.time() - end
-            has_done_projection = True
 
         history["train"]["loss"].append(t_loss)
         history["val"]["eer"].append(eer)
@@ -475,17 +471,17 @@ def main(args):
         # For warmup case: the lr here is after lr_scheduler.step
         if lr_scheduler is not None:
             logger.info(
-                f"------> Epoch No: {i+1} - LR: {lr_scheduler.get_last_lr()[0]:>7f} - Loss: {t_loss:>7f} - EER: {eer:>7f} - Time: {end-start:>2f}"
+                f"------> Epoch No: {i+1} - LR: {lr_scheduler.get_last_lr()[0]:>7f} - Loss: {t_loss:>7f} - EER: {eer:>7f} - Time: {end_train-start:>2f}"
             )
         else:
             logger.info(
-                f"------> Epoch No: {i+1} - Loss: {t_loss:>7f} - EER: {eer:>7f} - Time: {end-start:>2f}"
+                f"------> Epoch No: {i+1} - Loss: {t_loss:>7f} - EER: {eer:>7f} - Time: {end_train-start:>2f}"
             )
         if has_done_projection:
             logger.info(f"Prototype projection time: {projection_time:>2f} seconds")
 
-        if eer < g_eer:
-            logger.info(f"EER improved from {g_eer} to {eer}")
+        if eer < g_eer and has_done_projection:  # Only save model if EER improved and we have done prototype projection (to ensure the saved model is the one with projected prototypes)
+            logger.info(f"EER improved from {g_eer} to {eer} on a PROJECTION epoch. Saving best model.")
             g_eer = eer
             best_epoch = i + 1
             torch.save(
