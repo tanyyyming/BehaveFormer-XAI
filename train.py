@@ -232,7 +232,7 @@ def main(args):
     # TODO: Hyperparameters regarding the loss function, will be put in config file later
     LAMBDA_R1 = 0.01   # Keep these small so they don't overpower the Triplet
     LAMBDA_R2 = 0.01
-    LAMBDA_PDL = 500   # Start strong to force them apart (per Gee et al.)
+    LAMBDA_PDL = 1000   # Start strong to force them apart (per Gee et al.)
     
     logger = create_logger(work_dir)
     logger.info(f"Input argument: {str(args)}\n")
@@ -326,25 +326,8 @@ def main(args):
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=0.05
     )
-
-    # Warmup learning rate from base_lr to target_lr (learning_rate) over warmup_epochs
-    base_lr = hyperparams["warmup_baselr"]
-    warmup_epochs = hyperparams["warmup_epochs"]
-    warmup_steps = (
-        len(train_dataloader) * warmup_epochs
-    )  # warmup is trigger after every batch so warmup_steps = #batch * #warmup_epochs
-    training_steps = len(train_dataloader) * (epochs - warmup_epochs)
-    lr_warmup = torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=float(base_lr / learning_rate), total_iters=warmup_steps
-    )
-    lr_constant = torch.optim.lr_scheduler.ConstantLR(
-        optimizer, factor=1, total_iters=training_steps
-    )
-    lr_schedule_list = [lr_warmup, lr_constant]
-    lr_scheduler = torch.optim.lr_scheduler.ChainedScheduler(lr_schedule_list)
-
-    logger.info(f"Number of epochs {epochs}")
     g_eer = math.inf
+
     # Either transfer learning (from a different dataset) or resume or train from scratch
     if args.mode == "transfer_learning":  # Load pretrain weights
         checkpoint_pt = config_data["folders"]["transfer_learning_weights"]
@@ -382,6 +365,25 @@ def main(args):
         epochs = init_epoch + epochs
         g_eer = init_eer
 
+
+    # Warmup learning rate from base_lr to target_lr (learning_rate) over warmup_epochs
+    base_lr = hyperparams["warmup_baselr"]
+    warmup_epochs = hyperparams["warmup_epochs"]
+    warmup_steps = (
+        len(train_dataloader) * warmup_epochs
+    )  # warmup is trigger after every batch so warmup_steps = #batch * #warmup_epochs
+    training_steps = len(train_dataloader) * (epochs - warmup_epochs)
+    lr_warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=float(base_lr / learning_rate), total_iters=warmup_steps
+    )
+    lr_constant = torch.optim.lr_scheduler.ConstantLR(
+        optimizer, factor=1, total_iters=training_steps
+    )
+    lr_schedule_list = [lr_warmup, lr_constant]
+    lr_scheduler = torch.optim.lr_scheduler.ChainedScheduler(lr_schedule_list)
+
+    logger.info(f"Number of epochs {epochs}")
+
     # MAIN WORK
     history = {
         "train": {"loss": []},
@@ -393,7 +395,7 @@ def main(args):
     best_epoch = -1
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     for i in range(init_epoch, epochs):
-        t_loss = 0.0
+        t_loss = triplet_loss_epoch = r1_loss_epoch = r2_loss_epoch = pdl_loss_epoch = 0
         start = time.time()
         model.train(True)
         for batch_idx, item in enumerate(train_dataloader):
@@ -404,23 +406,24 @@ def main(args):
                 anchor_out, anchor_latent = model(
                     [anchor[0].to(device).float(), anchor[1].to(device).float()]
                 )
-                positive_out = model(
+                positive_out, positive_latent = model(
                     [positive[0].to(device).float(), positive[1].to(device).float()]
-                )[0]
-                negative_out = model(
+                )
+                negative_out, negative_latent = model(
                     [negative[0].to(device).float(), negative[1].to(device).float()]
-                )[0]
+                )
             else:
                 anchor_out, anchor_latent = model(anchor[0].to(device).float())
-                positive_out = model(positive[0].to(device).float())[0]
-                negative_out = model(negative[0].to(device).float())[0]
+                positive_out, positive_latent = model(positive[0].to(device).float())
+                negative_out, negative_latent = model(negative[0].to(device).float())
 
             # 1. Triplet loss
             triplet_loss = triplet_loss_fn(anchor_out, positive_out, negative_out)
 
             # 2. Prototype Structural loss
+            all_latents = torch.cat([anchor_latent, positive_latent, negative_latent], dim=0)
             r1_loss, r2_loss, pdl_loss = structural_loss_fn(
-                latents=anchor_latent, prototypes=model.prototype_layer.prototypes
+                latents=all_latents, prototypes=model.prototype_layer.prototypes
             )
 
             # 3. Combined loss with weighting
@@ -432,8 +435,35 @@ def main(args):
                 lr_scheduler.step()
 
             t_loss = t_loss + loss.item()
+            triplet_loss_epoch = triplet_loss_epoch + triplet_loss.item()
+            r1_loss_epoch = r1_loss_epoch + LAMBDA_R1 * r1_loss.item()
+            r2_loss_epoch = r2_loss_epoch + LAMBDA_R2 * r2_loss.item()
+            pdl_loss_epoch = pdl_loss_epoch + LAMBDA_PDL * pdl_loss.item()
+
             if batch_idx == len(train_dataloader) - 1:
                 t_loss = t_loss / len(train_dataloader)
+                triplet_loss_epoch = triplet_loss_epoch / len(train_dataloader)
+                r1_loss_epoch = r1_loss_epoch / len(train_dataloader)
+                r2_loss_epoch = r2_loss_epoch / len(train_dataloader)
+                pdl_loss_epoch = pdl_loss_epoch / len(train_dataloader)
+        
+        end_train = time.time()
+
+        # Project prototypes before evaluation!
+        has_done_projection = False
+        
+        if ((i + 1) % prototype_projection_epoch_interval == 0) or ((i + 1) == epochs):
+            project_prototypes(
+                model=model,
+                train_dataloader=train_dataloader,
+                device=device,
+                epoch=i + 1,
+                save_dir=checkpoint_save_path,
+                imu_type=imu_type,
+            )
+            has_done_projection = True
+            projection_time = time.time() - end_train
+            logger.info(f"Projected prototypes & updated projection catalog up to epoch {i+1}")
 
         eer = evaluate(
             model,
@@ -446,28 +476,6 @@ def main(args):
             device,
             dataname,
         )
-        end = time.time()
-
-        # Prototype projection
-        has_done_projection = False
-        if ((i + 1) % prototype_projection_epoch_interval == 0) or (
-            (i + 1) == epochs
-        ):  # also project at the last epoch
-            project_prototypes(
-                model=model,
-                train_dataloader=train_dataloader,
-                device=device,
-                epoch=i + 1,
-                save_dir=checkpoint_save_path,
-                imu_type=imu_type,
-            )
-
-            logger.info(
-                f"Projected prototypes & updated projection catalog up to epoch {i+1}"
-            )
-
-            projection_time = time.time() - end
-            has_done_projection = True
 
         history["train"]["loss"].append(t_loss)
         history["val"]["eer"].append(eer)
@@ -475,17 +483,21 @@ def main(args):
         # For warmup case: the lr here is after lr_scheduler.step
         if lr_scheduler is not None:
             logger.info(
-                f"------> Epoch No: {i+1} - LR: {lr_scheduler.get_last_lr()[0]:>7f} - Loss: {t_loss:>7f} - EER: {eer:>7f} - Time: {end-start:>2f}"
+                f"------> Epoch No: {i+1} - LR: {lr_scheduler.get_last_lr()[0]:>7f} - Loss: {t_loss:>7f} - EER: {eer:>7f} - Time: {end_train-start:>2f}"
             )
         else:
             logger.info(
-                f"------> Epoch No: {i+1} - Loss: {t_loss:>7f} - EER: {eer:>7f} - Time: {end-start:>2f}"
+                f"------> Epoch No: {i+1} - Loss: {t_loss:>7f} - EER: {eer:>7f} - Time: {end_train-start:>2f}"
+            )
+        if i % 10 == 0:
+            logger.info(
+                f"------> Triplet Loss: {triplet_loss_epoch:>5f} - R1 Loss: {r1_loss_epoch:>5f} - R2 Loss: {r2_loss_epoch:>5f} - PDL Loss: {pdl_loss_epoch:>5f}"
             )
         if has_done_projection:
             logger.info(f"Prototype projection time: {projection_time:>2f} seconds")
 
-        if eer < g_eer:
-            logger.info(f"EER improved from {g_eer} to {eer}")
+        if eer < g_eer and has_done_projection:  # Only save model if EER improved and we have done prototype projection (to ensure the saved model is the one with projected prototypes)
+            logger.info(f"EER improved from {g_eer} to {eer} on a PROJECTION epoch. Saving best model.")
             g_eer = eer
             best_epoch = i + 1
             torch.save(
