@@ -232,7 +232,7 @@ def main(args):
     # TODO: Hyperparameters regarding the loss function, will be put in config file later
     LAMBDA_R1 = 0.01   # Keep these small so they don't overpower the Triplet
     LAMBDA_R2 = 0.01
-    LAMBDA_PDL = 500   # Start strong to force them apart (per Gee et al.)
+    LAMBDA_PDL = 1000   # Start strong to force them apart (per Gee et al.)
     
     logger = create_logger(work_dir)
     logger.info(f"Input argument: {str(args)}\n")
@@ -395,7 +395,7 @@ def main(args):
     best_epoch = -1
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     for i in range(init_epoch, epochs):
-        t_loss = 0.0
+        t_loss = triplet_loss_epoch = r1_loss_epoch = r2_loss_epoch = pdl_loss_epoch = 0
         start = time.time()
         model.train(True)
         for batch_idx, item in enumerate(train_dataloader):
@@ -435,8 +435,17 @@ def main(args):
                 lr_scheduler.step()
 
             t_loss = t_loss + loss.item()
+            triplet_loss_epoch = triplet_loss_epoch + triplet_loss.item()
+            r1_loss_epoch = r1_loss_epoch + LAMBDA_R1 * r1_loss.item()
+            r2_loss_epoch = r2_loss_epoch + LAMBDA_R2 * r2_loss.item()
+            pdl_loss_epoch = pdl_loss_epoch + LAMBDA_PDL * pdl_loss.item()
+
             if batch_idx == len(train_dataloader) - 1:
                 t_loss = t_loss / len(train_dataloader)
+                triplet_loss_epoch = triplet_loss_epoch / len(train_dataloader)
+                r1_loss_epoch = r1_loss_epoch / len(train_dataloader)
+                r2_loss_epoch = r2_loss_epoch / len(train_dataloader)
+                pdl_loss_epoch = pdl_loss_epoch / len(train_dataloader)
         
         end_train = time.time()
 
@@ -479,6 +488,10 @@ def main(args):
         else:
             logger.info(
                 f"------> Epoch No: {i+1} - Loss: {t_loss:>7f} - EER: {eer:>7f} - Time: {end_train-start:>2f}"
+            )
+        if i % 10 == 0:
+            logger.info(
+                f"------> Triplet Loss: {triplet_loss_epoch:>5f} - R1 Loss: {r1_loss_epoch:>5f} - R2 Loss: {r2_loss_epoch:>5f} - PDL Loss: {pdl_loss_epoch:>5f}"
             )
         if has_done_projection:
             logger.info(f"Prototype projection time: {projection_time:>2f} seconds")
