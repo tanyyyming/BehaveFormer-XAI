@@ -179,6 +179,7 @@ def main(args):
     model_save_path = os.path.join(work_dir, "models")
     checkpoint_save_path = os.path.join(work_dir, "checkpoints")
     os.makedirs(best_model_save_path)
+    os.makedirs(model_save_path)
     os.makedirs(checkpoint_save_path)
 
     # Read config, set output folder to config
