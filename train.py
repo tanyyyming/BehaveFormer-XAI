@@ -430,6 +430,15 @@ def main(args):
             # 3. Combined loss with weighting
             loss = triplet_loss + LAMBDA_R1 * r1_loss + LAMBDA_R2 * r2_loss + LAMBDA_PDL * pdl_loss
             loss.backward()
+
+            # 4. Gradient clipping
+            total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)   
+            # Print the norm for the first batch of every epoch
+            if batch_idx == 0: 
+                print(f"----> [DEBUG] Raw Gradient Norm: {total_norm:.4f}")
+            if total_norm > 10.0:
+                print(f"----> [WARNING] Massive Gradient Spike Intercepted in batch {batch_idx}! Raw Norm: {total_norm:.4f}")
+
             optimizer.step()
 
             if lr_scheduler is not None:
