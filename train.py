@@ -433,11 +433,11 @@ def main(args):
 
             # 4. Gradient clipping
             total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)   
-            # Print the norm for the first batch of every epoch
+            # Log the norm for the first batch of every epoch
             if batch_idx == 0: 
-                print(f"----> [DEBUG] Raw Gradient Norm: {total_norm:.4f}")
+                logger.info(f"----> [DEBUG] Raw Gradient Norm: {total_norm:.4f}")
             if total_norm > 10.0:
-                print(f"----> [WARNING] Massive Gradient Spike Intercepted in batch {batch_idx}! Raw Norm: {total_norm:.4f}")
+                logger.warning(f"----> [WARNING] Massive Gradient Spike Intercepted in batch {batch_idx}! Raw Norm: {total_norm:.4f}")
 
             optimizer.step()
 
