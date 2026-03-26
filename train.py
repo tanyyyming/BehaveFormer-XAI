@@ -176,6 +176,7 @@ def main(args):
     args.config = shutil.copy2(args.config, os.path.join(work_dir))
 
     best_model_save_path = os.path.join(work_dir, "best_models")
+    model_save_path = os.path.join(work_dir, "models")
     checkpoint_save_path = os.path.join(work_dir, "checkpoints")
     os.makedirs(best_model_save_path)
     os.makedirs(checkpoint_save_path)
@@ -229,11 +230,10 @@ def main(args):
 
     learning_rate = hyperparams["learning_rate"]
 
-    # TODO: Hyperparameters regarding the loss function, will be put in config file later
-    LAMBDA_R1 = 0.01   # Keep these small so they don't overpower the Triplet
-    LAMBDA_R2 = 0.01
-    LAMBDA_PDL = 1000   # Start strong to force them apart (per Gee et al.)
-    
+    LAMBDA_R1 = hyperparams["lambda_r1"]
+    LAMBDA_R2 = hyperparams["lambda_r2"]
+    LAMBDA_PDL = hyperparams["lambda_pdl"]
+
     logger = create_logger(work_dir)
     logger.info(f"Input argument: {str(args)}\n")
 
@@ -489,7 +489,7 @@ def main(args):
             logger.info(
                 f"------> Epoch No: {i+1} - Loss: {t_loss:>7f} - EER: {eer:>7f} - Time: {end_train-start:>2f}"
             )
-        if i % 10 == 0:
+        if i % 5 == 0:
             logger.info(
                 f"------> Triplet Loss: {triplet_loss_epoch:>5f} - R1 Loss: {r1_loss_epoch:>5f} - R2 Loss: {r2_loss_epoch:>5f} - PDL Loss: {pdl_loss_epoch:>5f}"
             )
@@ -502,6 +502,13 @@ def main(args):
             best_epoch = i + 1
             torch.save(
                 model.state_dict(), best_model_save_path + f"/epoch_{i+1}_eer_{eer}.pt"
+            )
+        
+        # Save some later checkpoints to see if there is overfitting, not necessarily the one with best EER, but the one with projected prototypes for better visualization and analysis.
+        if (i + 1) % (2 *prototype_projection_epoch_interval) == 0 and (i + 1) >= 250:
+            logger.info(f"Saving checkpoint at epoch {i+1} with EER {eer} for prototype visualization and analysis.")
+            torch.save(
+                model.state_dict(), model_save_path + f"/epoch_{i+1}_eer_{eer}.pt"
             )
 
         if args.checkpoint_interval > 0 and ((i + 1) % args.checkpoint_interval == 0):
