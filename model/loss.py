@@ -11,7 +11,7 @@ class TripletLoss(nn.Module):
             self.logger = logger
 
     def calc_euclidean(self, x1, x2):
-        return (x1 - x2).pow(2).sum(dim=1).sqrt()
+        return (x1 - x2).pow(2).sum(dim=1).clamp(min=1e-8).sqrt()
 
     def calc_cosine(self, x1, x2):
         dot_product_sum = (x1 * x2).sum(dim=1)
@@ -58,14 +58,18 @@ class PrototypeStructuralLoss(nn.Module):
 
         # 2. R1 & R2 Losses (Data-to-Prototype)
         # Dimension (num_latents, num_prototypes) matrix of squared Euclidean distances
-        dist_data_proto = torch.cdist(z_norm, p_norm, p=2) ** 2
+        # ||z - p||^2 = 2 - 2*(z @ p.T)
+        dist_data_proto = 2.0 - 2.0 * torch.matmul(z_norm, p_norm.T)
+        # Clamp to avoid tiny negative numbers due to float32 precision errors
+        dist_data_proto = dist_data_proto.clamp(min=0.0)
         # Minimising R1 loss term promotes each prototype vector to learn one of the encoded training example
         r1_loss = torch.mean(torch.min(dist_data_proto, dim=0)[0])
         # Minimising R2 loss term promotes each encoded training example to be close to at least one prototype vector
         r2_loss = torch.mean(torch.min(dist_data_proto, dim=1)[0])
 
         # 3. PDL Loss (Prototype-to-Prototype)
-        dist_proto_proto = torch.cdist(p_norm, p_norm, p=2) ** 2
+        dist_proto_proto = 2.0 - 2.0 * torch.matmul(p_norm, p_norm.T)
+        dist_proto_proto = dist_proto_proto.clamp(min=0.0)
         mask = torch.eye(m, device=p_norm.device).bool()
         dist_proto_proto.masked_fill_(mask, float("inf"))
 
