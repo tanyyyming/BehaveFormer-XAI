@@ -366,7 +366,6 @@ def main(args):
         epochs = init_epoch + epochs
         g_eer = init_eer
 
-
     # Warmup learning rate from base_lr to target_lr (learning_rate) over warmup_epochs
     base_lr = hyperparams["warmup_baselr"]
     warmup_epochs = hyperparams["warmup_epochs"]
@@ -422,22 +421,33 @@ def main(args):
             triplet_loss = triplet_loss_fn(anchor_out, positive_out, negative_out)
 
             # 2. Prototype Structural loss
-            all_latents = torch.cat([anchor_latent, positive_latent, negative_latent], dim=0)
+            all_latents = torch.cat(
+                [anchor_latent, positive_latent, negative_latent], dim=0
+            )
             r1_loss, r2_loss, pdl_loss = structural_loss_fn(
                 latents=all_latents, prototypes=model.prototype_layer.prototypes
             )
 
             # 3. Combined loss with weighting
-            loss = triplet_loss + LAMBDA_R1 * r1_loss + LAMBDA_R2 * r2_loss + LAMBDA_PDL * pdl_loss
+            loss = (
+                triplet_loss
+                + LAMBDA_R1 * r1_loss
+                + LAMBDA_R2 * r2_loss
+                + LAMBDA_PDL * pdl_loss
+            )
             loss.backward()
 
             # 4. Gradient clipping
-            total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)   
+            total_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(), max_norm=2.0
+            )
             # Log the norm for the first batch of every epoch
-            if batch_idx == 0: 
+            if batch_idx == 0:
                 logger.info(f"----> [DEBUG] Raw Gradient Norm: {total_norm:.4f}")
             if total_norm > 10.0:
-                logger.warning(f"----> [WARNING] Massive Gradient Spike Intercepted in batch {batch_idx}! Raw Norm: {total_norm:.4f}")
+                logger.warning(
+                    f"----> [WARNING] Massive Gradient Spike Intercepted in batch {batch_idx}! Raw Norm: {total_norm:.4f}"
+                )
 
             optimizer.step()
 
@@ -456,12 +466,12 @@ def main(args):
                 r1_loss_epoch = r1_loss_epoch / len(train_dataloader)
                 r2_loss_epoch = r2_loss_epoch / len(train_dataloader)
                 pdl_loss_epoch = pdl_loss_epoch / len(train_dataloader)
-        
+
         end_train = time.time()
 
         # Project prototypes before evaluation!
         has_done_projection = False
-        
+
         if ((i + 1) % prototype_projection_epoch_interval == 0) or ((i + 1) == epochs):
             project_prototypes(
                 model=model,
@@ -473,7 +483,9 @@ def main(args):
             )
             has_done_projection = True
             projection_time = time.time() - end_train
-            logger.info(f"Projected prototypes & updated projection catalog up to epoch {i+1}")
+            logger.info(
+                f"Projected prototypes & updated projection catalog up to epoch {i+1}"
+            )
 
         eer = evaluate(
             model,
@@ -506,17 +518,25 @@ def main(args):
         if has_done_projection:
             logger.info(f"Prototype projection time: {projection_time:>2f} seconds")
 
-        if eer < g_eer and has_done_projection:  # Only save model if EER improved and we have done prototype projection (to ensure the saved model is the one with projected prototypes)
-            logger.info(f"EER improved from {g_eer} to {eer} on a PROJECTION epoch. Saving best model.")
+        if (
+            eer < g_eer and has_done_projection
+        ):  # Only save model if EER improved and we have done prototype projection (to ensure the saved model is the one with projected prototypes)
+            logger.info(
+                f"EER improved from {g_eer} to {eer} on a PROJECTION epoch. Saving best model."
+            )
             g_eer = eer
             best_epoch = i + 1
             torch.save(
                 model.state_dict(), best_model_save_path + f"/epoch_{i+1}_eer_{eer}.pt"
             )
-        
+
         # Save some later checkpoints to see if there is overfitting, not necessarily the one with best EER, but the one with projected prototypes for better visualization and analysis.
-        if (i + 1) % (2 *prototype_projection_epoch_interval) == 0 and (i + 1) >= 250:
-            logger.info(f"Saving checkpoint at epoch {i+1} with EER {eer} for prototype visualization and analysis.")
+        if (
+            (i + 1) % (2 * prototype_projection_epoch_interval) == 0 and (i + 1) >= 300
+        ) or (i + 1) in (120, 140, 160):
+            logger.info(
+                f"Saving checkpoint at epoch {i+1} with EER {eer} for prototype visualization and analysis."
+            )
             torch.save(
                 model.state_dict(), model_save_path + f"/epoch_{i+1}_eer_{eer}.pt"
             )
