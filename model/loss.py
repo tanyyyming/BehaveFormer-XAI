@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 
 class TripletLoss(nn.Module):
-    def __init__(self, margin=0.2, logger=None):
+    def __init__(self, margin=1.0, logger=None):
         super(TripletLoss, self).__init__()
         self.margin = margin
         if logger:
@@ -27,20 +27,16 @@ class TripletLoss(nn.Module):
         return (x1 - x2).abs().sum(dim=1)
 
     def forward(self, anchor, positive, negative):
-        # 1. Calculate Cosine Distances
-        distance_positive = self.calc_cosine_distance(anchor, positive)
-        distance_negative = self.calc_cosine_distance(anchor, negative)
-        
-        # 2. Apply Standard Triplet Loss Formula
+        distance_positive = self.calc_euclidean(anchor, positive)
+        distance_negative = self.calc_euclidean(anchor, negative)
         losses = torch.relu(distance_positive - distance_negative + self.margin)
 
-        # 3. NaN checking
         if (
             not (anchor.isnan().any())
             and not (positive.isnan().any())
             and not (negative.isnan().any())
         ):
-            if (losses.isnan().any()) and hasattr(self, 'logger'):
+            if (losses.isnan().any()) and self.logger:
                 self.logger.info("losses has NaN")
 
         return losses.mean()
@@ -48,8 +44,8 @@ class TripletLoss(nn.Module):
 
 class PrototypeStructuralLoss(nn.Module):
     """
-    Calculates Prototype Diversity Loss (PDL), R1, and R2 structural losses on the Cosine Hypersphere
-    using Normalized Squared Euclidean distances.
+    Calculates Prototype Diversity Loss (PDL), R1, and R2 structural losses 
+    using Unconstrained Euclidean Distance.
     Gee, A. H., Garcia-Olano, D., Ghosh, J., & Paydarfar, D. (2019, April 18). Explaining Deep Classification of Time-Series Data with Learned Prototypes. arXiv.org. https://arxiv.org/abs/1904.08935
     """
 
@@ -58,34 +54,41 @@ class PrototypeStructuralLoss(nn.Module):
         self.eps = eps
 
     def forward(self, latents, prototypes):
-        # 1. Project to the Unit Hypersphere
-        z_norm = F.normalize(latents, p=2, dim=1)
-        p_norm = F.normalize(prototypes, p=2, dim=1)
-
-        m = p_norm.shape[0]
-        n = z_norm.shape[0]
+        # 1. NO NORMALIZATION: Operate in unconstrained Euclidean space
+        m = prototypes.shape[0]
+        n = latents.shape[0]
 
         # 2. R1 & R2 Losses (Data-to-Prototype)
-        # Dimension (num_latents, num_prototypes) matrix of squared Euclidean distances
-        # ||z - p||^2 = 2 - 2*(z @ p.T)
-        dist_data_proto = 2.0 - 2.0 * torch.matmul(z_norm, p_norm.T)
-        # Clamp to avoid tiny negative numbers due to float32 precision errors
-        dist_data_proto = dist_data_proto.clamp(min=0.0)
-        # Minimising R1 loss term promotes each prototype vector to learn one of the encoded training example
+        # Calculate pairwise squared Euclidean distances: ||z - p||^2 = ||z||^2 + ||p||^2 - 2(z @ p.T)
+        z_sq = latents.pow(2).sum(dim=1, keepdim=True)        # Shape: (n, 1)
+        p_sq = prototypes.pow(2).sum(dim=1).unsqueeze(0)      # Shape: (1, m)
+        
+        dist_sq_data_proto = z_sq + p_sq - 2.0 * torch.matmul(latents, prototypes.T)
+        
+        # Apply clamp BEFORE sqrt to avoid NaN gradients when distance is exactly 0
+        dist_data_proto = dist_sq_data_proto.clamp(min=1e-8).sqrt()
+
+        # R1: Every prototype must be close to at least one training example
         r1_loss = torch.mean(torch.min(dist_data_proto, dim=0)[0])
-        # Minimising R2 loss term promotes each encoded training example to be close to at least one prototype vector
+        
+        # R2: Every training example must be close to at least one prototype
         r2_loss = torch.mean(torch.min(dist_data_proto, dim=1)[0])
 
         # 3. PDL Loss (Prototype-to-Prototype)
-        dist_proto_proto = 2.0 - 2.0 * torch.matmul(p_norm, p_norm.T)
-        dist_proto_proto = dist_proto_proto.clamp(min=0.0)
-        mask = torch.eye(m, device=p_norm.device).bool()
+        p_sq_col = prototypes.pow(2).sum(dim=1, keepdim=True) # Shape: (m, 1)
+        p_sq_row = prototypes.pow(2).sum(dim=1).unsqueeze(0)  # Shape: (1, m)
+        
+        dist_sq_proto_proto = p_sq_col + p_sq_row - 2.0 * torch.matmul(prototypes, prototypes.T)
+        dist_proto_proto = dist_sq_proto_proto.clamp(min=1e-8).sqrt()
+        
+        # Mask the diagonal (distance to itself) with infinity so it isn't picked as the minimum
+        mask = torch.eye(m, device=prototypes.device).bool()
         dist_proto_proto.masked_fill_(mask, float("inf"))
 
         min_distances, _ = torch.min(dist_proto_proto, dim=1)
         avg_min_dist = torch.mean(min_distances)
 
-        # Inverse log penalty
+        # Inverse log penalty for PDL
         pdl_loss = 1.0 / (torch.log(avg_min_dist + 1.0) + self.eps)
 
         return r1_loss, r2_loss, pdl_loss

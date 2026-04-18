@@ -112,25 +112,34 @@ class Transformer(nn.Module):
 
 class PrototypeLayer(nn.Module):
     """
-    Addtional Prototype Layer for Ad-Hoc Explanability Enhancement
+    Additional Prototype Layer for Ante-Hoc Explainability Enhancement
+    (Updated to use Unconstrained Euclidean Distance + Softmax)
     """
     def __init__(self, num_prototypes, feature_dim):
         super(PrototypeLayer, self).__init__()
         # These are the "Shared Pool" of archetypes
-        # Shape: (50, 64) if num_prototypes=50, feature_dim=64
+        # Shape: (16, 64) if num_prototypes=16, feature_dim=64
         self.prototypes = nn.Parameter(torch.rand(num_prototypes, feature_dim))
 
     def forward(self, x):
         # x: (Batch, 64) - The latent vector from the linear layer
         
-        # 1. Normalize Input and Prototypes (Required for Cosine Similarity)
-        # p=2 means L2 norm, dim=1 means across the feature dimension
-        x_norm = F.normalize(x, p=2, dim=1)
-        p_norm = F.normalize(self.prototypes, p=2, dim=1)
+        # 1. Calculate Pairwise Squared Euclidean Distances
+        # ||x - p||^2 = ||x||^2 + ||p||^2 - 2(x @ p.T)
+        x_sq = x.pow(2).sum(dim=1, keepdim=True)               # Shape: (Batch, 1)
+        p_sq = self.prototypes.pow(2).sum(dim=1).unsqueeze(0)  # Shape: (1, num_prototypes)
         
-        # 2. Calculate Cosine Similarity via Matrix Multiplication
-        # (Batch, 64) x (64, 50) -> (Batch, 50)
-        similarity_scores = torch.mm(x_norm, p_norm.t())
+        # Shape: (Batch, num_prototypes)
+        dist_sq = x_sq + p_sq - 2.0 * torch.matmul(x, self.prototypes.t())
+        
+        # Clamp to prevent tiny negative values due to float32 precision errors
+        dist_sq = dist_sq.clamp(min=0.0)
+        
+        # 2. Convert Distances to Similarity Scores using Softmax
+        # We negate the distance (-dist_sq) so that:
+        # Smaller distance (closer in space) -> Higher Softmax score (closer to 1.0)
+        # Larger distance (further away) -> Lower Softmax score (closer to 0.0)
+        similarity_scores = F.softmax(-dist_sq, dim=1)
         
         return similarity_scores
 
