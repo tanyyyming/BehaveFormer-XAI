@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 
 class TripletLoss(nn.Module):
-    def __init__(self, margin=1.0, logger=None):
+    def __init__(self, margin=0.2, logger=None):
         super(TripletLoss, self).__init__()
         self.margin = margin
         if logger:
@@ -17,21 +17,30 @@ class TripletLoss(nn.Module):
         dot_product_sum = (x1 * x2).sum(dim=1)
         norm_multiply = (x1.pow(2).sum(dim=1).sqrt()) * (x2.pow(2).sum(dim=1).sqrt())
         return dot_product_sum / norm_multiply
+    
+    def calc_cosine_distance(self, x1, x2):
+        # PyTorch built-in is highly optimized and handles zero-division safely
+        # Cosine distance ranges from 0.0 (identical) to 2.0 (complete opposites)
+        return 1.0 - F.cosine_similarity(x1, x2, dim=1)
 
     def calc_manhattan(self, x1, x2):
         return (x1 - x2).abs().sum(dim=1)
 
     def forward(self, anchor, positive, negative):
-        distance_positive = self.calc_euclidean(anchor, positive)
-        distance_negative = self.calc_euclidean(anchor, negative)
+        # 1. Calculate Cosine Distances
+        distance_positive = self.calc_cosine_distance(anchor, positive)
+        distance_negative = self.calc_cosine_distance(anchor, negative)
+        
+        # 2. Apply Standard Triplet Loss Formula
         losses = torch.relu(distance_positive - distance_negative + self.margin)
 
+        # 3. NaN checking
         if (
             not (anchor.isnan().any())
             and not (positive.isnan().any())
             and not (negative.isnan().any())
         ):
-            if (losses.isnan().any()) and self.logger:
+            if (losses.isnan().any()) and hasattr(self, 'logger'):
                 self.logger.info("losses has NaN")
 
         return losses.mean()
