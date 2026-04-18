@@ -22,7 +22,7 @@ hyperparams:
     prototype_projection_epoch_interval: 20
     lambda_r1: 0.1
     lambda_r2: 0.1
-    lambda_pdl: 1.0
+    lambda_pdl: 0.01
     number_of_enrollment_sessions: 3
     number_of_verify_sessions: 2
     learning_rate: 0.001
