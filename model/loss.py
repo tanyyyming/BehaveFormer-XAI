@@ -83,7 +83,7 @@ class PrototypeStructuralLoss(nn.Module):
         
         # Mask the diagonal (distance to itself) with infinity so it isn't picked as the minimum
         mask = torch.eye(m, device=prototypes.device).bool()
-        dist_proto_proto.masked_fill_(mask, float("inf"))
+        dist_proto_proto = dist_proto_proto.masked_fill(mask, float("inf"))
 
         min_distances, _ = torch.min(dist_proto_proto, dim=1)
         avg_min_dist = torch.mean(min_distances)
