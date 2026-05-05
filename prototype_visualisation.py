@@ -9,6 +9,7 @@ from xml.parsers.expat import model
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 from sklearn.manifold import TSNE
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -17,6 +18,7 @@ from adjustText import adjust_text
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from ahrs.filters import Madgwick
 from scipy.spatial.transform import Rotation as R
+from itertools import combinations
 
 from model.dataset import (
     HUMITrainDataset,
@@ -270,6 +272,7 @@ def _create_sync_comet_3d_animation(
             
             # Small context titles for Turing blocks
             ax_g.set_title("Gyroscope (rad/s)", fontsize=10, color="black")
+            ax_g.set_ylim([1.2, -1.2])
             ax_g.set_xlim([0, len(time_steps) - 1]); ax_g.grid(True, linestyle=":", alpha=0.6)
 
         if "mag" in row_map:
@@ -282,6 +285,7 @@ def _create_sync_comet_3d_animation(
             
             # Small context titles for Turing blocks
             ax_m.set_title("Magnetometer 1st Derivative", fontsize=10, color="black")
+            ax_g.set_ylim([1.75, -1.75])
             ax_m.set_xlim([0, len(time_steps) - 1]); ax_m.grid(True, linestyle=":", alpha=0.6)
 
     plt.suptitle(super_title, fontsize=16 if layout_mode == "standard" else 20, fontweight="bold")
@@ -432,6 +436,7 @@ def _save_sync_comet_3d_last_frame(
                 ax_g.plot(time_steps, imu_data[:, 12], color="tab:red", alpha=0.7, label="g_x") # Gyro X
                 ax_g.set_title("Gyroscope Reading vs Time", fontsize=12)
                 ax_g.grid(True, linestyle=":", alpha=0.6)
+                ax_g.set_ylim([-0.4, 0.4])
 
                 ax_g.legend(loc="upper right") if idx == 0 else None
 
@@ -441,6 +446,7 @@ def _save_sync_comet_3d_last_frame(
                 ax_m.plot(time_steps, imu_data[:, 31], color="tab:green", alpha=0.7, label="m_fd_y") # Mag Y (FD)
                 ax_m.set_title("Magnetometer 1st Derivative vs Time", fontsize=12)
                 ax_m.grid(True, linestyle=":", alpha=0.6)
+                ax_m.set_ylim([-1.75, 1.75])
 
                 ax_m.legend(loc="upper right") if idx == 0 else None
                 
@@ -1486,6 +1492,114 @@ def generate_turing_test_study(model, test_dataset, device, catalog_path, target
     print(f"All {num_trials} trials generated! Answer key saved.")
 
 
+def quantify_signature_stability(model, test_dataset, device, imu_type="all"):
+    """
+    Calculates both Intra/Inter Distance and Feature-Wise Variance for IJCB.
+    """
+    model.eval()
+    
+    all_user_vectors = {} # Dictionary to hold vectors for each user
+    num_users = test_dataset.num_users
+    num_sessions = test_dataset.num_sessions
+    num_seqs = test_dataset.num_seqs
+    
+    print("Extracting all test vectors for stability analysis...")
+    
+    # 1. Collect all 16-D Similarity Vectors per user
+    with torch.no_grad():
+        for u in range(num_users):
+            user_vectors = []
+            for s in range(num_sessions):
+                for q in range(num_seqs):
+                    try:
+                        sample = test_dataset.load_data(u, s, q)
+                        test_scroll = torch.tensor(sample[0]).unsqueeze(0).to(device).float()
+                        
+                        if imu_type != "none":
+                            test_imu = torch.tensor(sample[1]).unsqueeze(0).to(device).float()
+                            out, _ = model([test_scroll, test_imu])
+                        else:
+                            out, _ = model(test_scroll)
+                            
+                        user_vectors.append(out[0].cpu().numpy())
+                    except Exception:
+                        continue # Skip missing data
+            if user_vectors:
+                all_user_vectors[u] = np.array(user_vectors)
+
+    # 2. Calculate Intra-User Distances (User compared to themselves)
+    intra_distances = []
+    feature_variances = []
+    
+    for u, vectors in all_user_vectors.items():
+        if len(vectors) > 1:
+            # Pairwise Euclidean distances between all of a user's own sequences
+            for v1, v2 in combinations(vectors, 2):
+                dist = np.linalg.norm(v1 - v2)
+                intra_distances.append(dist)
+            
+            # XAI Metric: Standard deviation of each prototype column
+            std_per_feature = np.std(vectors, axis=0)
+            feature_variances.append(np.mean(std_per_feature))
+
+    # 3. Calculate Inter-User Distances (User compared to everyone else)
+    inter_distances = []
+    user_ids = list(all_user_vectors.keys())
+    
+    for i in range(len(user_ids)):
+        for j in range(i + 1, len(user_ids)):
+            u1_vectors = all_user_vectors[user_ids[i]]
+            u2_vectors = all_user_vectors[user_ids[j]]
+            
+            # Compare every sequence of U1 against every sequence of U2
+            for v1 in u1_vectors:
+                for v2 in u2_vectors:
+                    dist = np.linalg.norm(v1 - v2)
+                    inter_distances.append(dist)
+
+    # 4. Final Aggregation
+    mean_intra = np.mean(intra_distances)
+    std_intra = np.std(intra_distances)
+    
+    mean_inter = np.mean(inter_distances)
+    std_inter = np.std(inter_distances)
+    
+    mean_feature_std = np.mean(feature_variances)
+
+    print("\n" + "="*50)
+    print("IJCB BEHAVIORAL STABILITY METRICS")
+    print("="*50)
+    print(f"Intra-User Distance (Mean ± SD): {mean_intra:.4f} ± {std_intra:.4f}")
+    print(f"Inter-User Distance (Mean ± SD): {mean_inter:.4f} ± {std_inter:.4f}")
+    print("-" * 50)
+    print(f"Distance Gap (Inter - Intra):    {mean_inter - mean_intra:.4f}")
+    print(f"Fisher Ratio (Separability):     {((mean_inter - mean_intra)**2) / (std_intra**2 + std_inter**2):.4f}")
+    print("-" * 50)
+    print(f"XAI Feature-Wise Stability (Mean prototype StdDev): {mean_feature_std:.4f}")
+    print("="*50)
+
+    return intra_distances, inter_distances, mean_intra, mean_inter, mean_feature_std
+
+
+def plot_distance_distributions(intra_distances, inter_distances, output_path):
+    plt.figure(figsize=(10, 6))
+    
+    # Plot the smoothed bell curves (KDE) with filled areas
+    sns.kdeplot(intra_distances, fill=True, color="royalblue", label="Genuine (Intra-User) Distribution", alpha=0.5, linewidth=2)
+    sns.kdeplot(inter_distances, fill=True, color="crimson", label="Impostor (Inter-User) Distribution", alpha=0.5, linewidth=2)
+    
+    # Styling for publication
+    plt.title("Distribution of Genuine vs. Impostor Behavioural Distances", fontsize=14, fontweight='bold')
+    plt.xlabel("Euclidean Distance", fontsize=12)
+    plt.ylabel("Probability Density", fontsize=12)
+    
+    plt.legend(loc='upper right', fontsize=11)
+    plt.grid(True, linestyle=':', alpha=0.6)
+    plt.tight_layout()
+    
+    plt.savefig(output_path, dpi=300) # High DPI for journal submission
+    plt.show()
+
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -1596,7 +1710,7 @@ def main():
     #     catalog_path=CATALOG_PATH,
     #     target_epoch=TARGET_EPOCH,
     # )
-    # for i in [23]:  # Run multiple times to see different test users
+    # for i in [35]:  # Run multiple times to see different test users
     #     explain_test_user_behavior(
     #         model,
     #         test_dataset,
@@ -1607,16 +1721,16 @@ def main():
     #         top_k=1,
     #         target_index=i,
     #     )
-    explain_multiple_users_behavioral_barcodes_2x2(
-        model,
-        test_dataset,
-        device,
-        target_epoch=TARGET_EPOCH,
-        target_indices=[0, 13, 21, 56],
-        highlight_protos=[3, 15],
-        imu_type=imu_type,
-        output_dir=OUTPUT_DIR,
-    )
+    # explain_multiple_users_behavioral_barcodes_2x2(
+    #     model,
+    #     test_dataset,
+    #     device,
+    #     target_epoch=TARGET_EPOCH,
+    #     target_indices=[0, 13, 21, 56],
+    #     highlight_protos=[3, 15],
+    #     imu_type=imu_type,
+    #     output_dir=OUTPUT_DIR,
+    # )
     # visualize_user_behavior_consistency_humidb(
     #     model,
     #     test_dataset,
@@ -1637,7 +1751,7 @@ def main():
     # )
 
     # plot_different_prototypes_3d_static(
-    #     CATALOG_PATH, prototypes_to_plot=[8, 11], target_epoch=TARGET_EPOCH, type="Different"
+    #     CATALOG_PATH, prototypes_to_plot=[3, 15], target_epoch=TARGET_EPOCH, type="Different"
     # )
     # animate_different_prototypes_3d(
     #     CATALOG_PATH, prototypes_to_plot=[5, 7, 11, 13], target_epoch=TARGET_EPOCH, type="Different"
@@ -1650,6 +1764,8 @@ def main():
     # animate_prototype_neighbors_3d(CATALOG_PATH, prototype_id=10, target_epoch=TARGET_EPOCH)
     # animate_prototype_neighbors_3d(CATALOG_PATH, prototype_id=15, target_epoch=TARGET_EPOCH)
 
+    intra_distances, inter_distances, mean_intra, mean_inter, mean_feature_std = quantify_signature_stability(model, test_dataset, device, imu_type=imu_type)
+    plot_distance_distributions(intra_distances, inter_distances, output_path=os.path.join(OUTPUT_DIR, "consistency_test_distance_distribution.png"))
 
 if __name__ == "__main__":
     main()
